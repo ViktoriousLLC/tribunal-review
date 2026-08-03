@@ -2056,7 +2056,7 @@ test("ledger read uses the authenticated PR query and fails visibly", async () =
     },
   });
   assert.equal(complete.state, "complete");
-  assert.equal(request.url, "https://example.test/eval-run?pr=770");
+  assert.equal(request.url, "https://example.test/eval-run?pr=103");
   assert.equal(request.options.method, "GET");
   assert.equal(request.options.headers.Authorization, "Bearer cron-secret");
 
