@@ -44,3 +44,5 @@ is clean, say so and stop.
   over a pattern repeated across files.
 - **A credential decision must forward exactly one credential.** Two in one environment
   means whichever the tool prefers wins silently.
+- **A control that cannot be turned off is not a control.** Anything that spends money
+  must name the command that stops it, at the moment you agree to it.
