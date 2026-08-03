@@ -78,6 +78,40 @@ export function secretCommands({ claude, gpt, gemini, billing }) {
   return { wanted, lines };
 }
 
+/**
+ * Said at the moment somebody agrees to be billed, not buried in a file.
+ *
+ * Three things they need and cannot work out from the prompt they just answered: that it
+ * charges on EVERY dispatch with nothing capping it, how to stop, and what happens if they
+ * later get a subscription. That last one is the correction worth making out loud, because
+ * "an API key overrides your plan" is the normal behaviour of these tools and is exactly
+ * what caused the incident this project was built around. It is not what happens here.
+ */
+function meteredWarning(vendor, keyEnv, planEnv) {
+  console.log("");
+  console.log(`  ┌─ ${vendor}: you are choosing to be BILLED ─────────────────────────`);
+  console.log("  │");
+  console.log("  │  Every dispatch charges your account. Not once at setup: each time");
+  console.log("  │  you run the panel, for as long as the key is there.");
+  console.log("  │");
+  console.log("  │  NOTHING IN THIS TOOL CAPS THAT SPEND. There is no budget, no limit,");
+  console.log("  │  no monthly ceiling. Set one on the vendor's own dashboard if you");
+  console.log("  │  want a floor under how wrong this can go.");
+  console.log("  │");
+  console.log("  │  Every run reports what it actually cost, in the pull request comment");
+  console.log("  │  and in the run log. Read the first one before you dispatch a second.");
+  console.log("  │");
+  console.log("  │  TO STOP BILLING, either is enough and both take effect immediately:");
+  console.log("  │    gh variable set ALLOW_METERED --body false     (keeps the key, off)");
+  console.log(`  │    gh secret delete ${keyEnv}`.padEnd(68) + "(removes it entirely)");
+  console.log("  │");
+  console.log(`  │  If you later get a subscription, add ${planEnv}`);
+  console.log("  │  and this tool switches to it automatically. It prefers the");
+  console.log("  │  subscription and stops touching your key, so billing stops without");
+  console.log("  │  you deleting anything. You are never charged twice for one leg.");
+  console.log("  └───────────────────────────────────────────────────────────────────");
+}
+
 /** Run a gh command and return its stdout, or null when gh cannot answer. */
 async function gh(args) {
   const { spawnSync } = await import("node:child_process");
@@ -162,6 +196,8 @@ async function doctorRepo(repoArg) {
   }
   if (billed.length > 0) {
     console.log(`  BILLED PER CALL: ${billed.join(", ")}. Everything else is on a subscription.`);
+    console.log("  Every dispatch charges you, and nothing in this tool caps it.");
+    console.log("  Stop it with:  gh variable set ALLOW_METERED --body false");
   }
   if (claudeMode === "none" && legs.length > 0) {
     console.log("  No judge: the blinded reconciliation pass is Claude-only, so you get each");
@@ -264,6 +300,7 @@ async function init() {
       { label: "Yes, use my API key and bill me per call", value: "metered" },
       { label: "No, skip the Claude legs entirely", value: "none" },
     ]);
+    if (claude === "metered") meteredWarning("Anthropic", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN");
   }
 
   let gpt = await ask(rl, "GPT access?", [
@@ -275,6 +312,7 @@ async function init() {
       { label: "Yes, use my API key and bill me per call", value: "metered" },
       { label: "No, skip the GPT leg entirely", value: "none" },
     ]);
+    if (gpt === "metered") meteredWarning("OpenAI", "OPENAI_API_KEY", "CODEX_AUTH_JSON");
   }
   const gemini = await ask(rl, "Gemini API key? This leg is billed per call.", [
     { label: "Yes, and I want it on", value: "on" },

@@ -1006,11 +1006,21 @@ function buildEvalRunLegs({ legs, billing, openaiBilling }) {
         usd = 0;
       }
     } else if (model === "claude" || model === "fable" || model === "openai") {
-      // These legs are structurally plan-covered. The invoice verdict only says
-      // whether that coverage was verified, never whether their token estimate
-      // belongs in this separate metered ledger.
-      usd = 0;
-      provenance = vendorBilling?.state === "verified-plan" ? "invoice-verified" : "unverified";
+      // ONLY a leg that actually ran on a subscription is zeroed. `leg.plan` is set from
+      // the credential the leg was handed, not assumed.
+      //
+      // This branch used to zero unconditionally, on a comment reading "these legs are
+      // structurally plan-covered" — true until the pay-per-call route existed, and false
+      // the moment it did. Left alone it would have written $0 into the immutable cost
+      // ledger for a run that really billed: a hard-zeroed unmeasured cost, which is the
+      // exact pattern this module exists to abolish, reintroduced by the change that
+      // widened who can use the tool.
+      if (leg.plan) {
+        usd = 0;
+        provenance = vendorBilling?.state === "verified-plan" ? "invoice-verified" : "unverified";
+      } else {
+        provenance = usd > 0 ? "estimated-from-tokens" : "not-reported";
+      }
     }
 
     return {

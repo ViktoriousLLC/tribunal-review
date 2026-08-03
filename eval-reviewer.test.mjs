@@ -271,7 +271,7 @@ test("buildDataRecord: records a supplied head SHA and omits an absent one", () 
 test("renderComment: records a head SHA only after at least one successful leg", () => {
   const failedLegs = [{ model: "claude", ok: false, findings: [], usage: { input: 0, output: 0 }, costUsd: 0 }];
   assert.equal(Object.hasOwn(extractEvalData(renderComment([], failedLegs, { headSha: "abc123" })), "head_sha"), false);
-  const successfulLegs = [{ model: "claude", ok: true, findings: [], usage: { input: 0, output: 0 }, costUsd: 0 }];
+  const successfulLegs = [{ model: "claude", ok: true, plan: true, findings: [], usage: { input: 0, output: 0 }, costUsd: 0 }];
   assert.equal(extractEvalData(renderComment([], successfulLegs, { headSha: "abc123" })).head_sha, "abc123");
 });
 test("renderComment: zero legs → 'no keys' message, no crash", () => {
@@ -1067,7 +1067,7 @@ test("EVERY off-plan leg is announced, and billing renders even when nothing ran
 });
 
 test("the durable record carries the billing VERDICT, so the log cannot read $0 as proven-free", () => {
-  const legs = [{ model: "openai", ok: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0, apiModel: "gpt-5.6-sol" }];
+  const legs = [{ model: "openai", ok: true, plan: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0, apiModel: "gpt-5.6-sol" }];
   const md = renderComment([], legs, {
     billing: { state: "verified-plan", provider: "Anthropic", detail: "ok" },
     openaiBilling: { state: "unverified", provider: "OpenAI", detail: "no admin key" },
@@ -1202,7 +1202,7 @@ test("the GPT leg's DEFAULT path is the Codex plan, and its spawn passes an expl
 
 test("Every provider's billing provenance renders in the comment", () => {
   const legs = [
-    { model: "openai", ok: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0, apiModel: "gpt-5.6-sol" },
+    { model: "openai", ok: true, plan: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0, apiModel: "gpt-5.6-sol" },
     { model: "gemini", ok: true, findings: [], usage: { input: 2, output: 3 }, costUsd: 0.01, apiModel: "gemini-3.1-pro-preview" },
   ];
   const md = renderComment([], legs, {
@@ -1318,7 +1318,7 @@ test("ONLY the never-called path omits `attempts` — every other exit carries i
 test("a MISSING gemini leg record is unknown spend, not proven-zero spend", () => {
   // The `!geminiLeg` disjunct used to share a branch with "no request was made", which
   // smuggled missing telemetry into the one sentence allowed to state a billing fact.
-  const md = renderComment([], [{ model: "openai", ok: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0 }], {});
+  const md = renderComment([], [{ model: "openai", ok: true, plan: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0 }], {});
   assert.match(md, /Gemini leg.*no record of this leg reached the comment/);
   assert.match(md, /UNKNOWN/);
   // The row deliberately CONTAINS the phrase in order to deny it, so assert on the claim
@@ -1495,13 +1495,13 @@ test("Plan-only zeroing is structural — no Anthropic or OpenAI SDK is importab
 test("the per-run ledger records every leg with honest provenance and sums usd", () => {
   const payload = buildEvalRunPayload({
     runId: "12345",
-    pr: "756",
+    pr: 101,
     headSha: "abc123",
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [
-      { model: "claude", apiModel: "claude-opus-5", usage: { input: 10, output: 2 }, costUsd: 0 },
-      { model: "fable", apiModel: "claude-fable-5", usage: { input: 20, output: 3 }, costUsd: 0 },
-      { model: "openai", apiModel: "gpt-5.6-sol", usage: { input: 30, output: 4 }, costUsd: 0 },
+      { model: "claude", apiModel: "claude-opus-5", plan: true, usage: { input: 10, output: 2 }, costUsd: 0 },
+      { model: "fable", apiModel: "claude-fable-5", plan: true, usage: { input: 20, output: 3 }, costUsd: 0 },
+      { model: "openai", apiModel: "gpt-5.6-sol", plan: true, usage: { input: 30, output: 4 }, costUsd: 0 },
       {
         model: "gemini",
         apiModel: "gemini-3.1-pro-preview",
@@ -1538,7 +1538,7 @@ test("the per-run ledger records every leg with honest provenance and sums usd",
 test("a no-request Gemini leg and every absent leg are not-reported", () => {
   const payload = buildEvalRunPayload({
     runId: "67890",
-    pr: 756,
+    pr: 101,
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [{ model: "gemini", usage: { input: 0, output: 0 }, costUsd: 0, requested: false }],
     billing: { state: "verified-plan" },
@@ -1551,7 +1551,7 @@ test("a no-request Gemini leg and every absent leg are not-reported", () => {
 test("a token-less skipped Claude leg is not-reported, never invoice-verified", () => {
   const payload = buildEvalRunPayload({
     runId: "12345-1",
-    pr: 756,
+    pr: 101,
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [
       {
@@ -1575,7 +1575,7 @@ test("a token-less skipped Claude leg is not-reported, never invoice-verified", 
 test("a failed Gemini leg keeps billed attempts and estimated provenance", () => {
   const payload = buildEvalRunPayload({
     runId: "12345-1",
-    pr: 756,
+    pr: 101,
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [
       {
@@ -1599,7 +1599,7 @@ test("a failed Gemini leg keeps billed attempts and estimated provenance", () =>
 test("Gemini spend is estimated even when attempts is absent", () => {
   const payload = buildEvalRunPayload({
     runId: "12345-1",
-    pr: 756,
+    pr: 101,
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [
       {
@@ -1622,12 +1622,13 @@ test("Gemini spend is estimated even when attempts is absent", () => {
 test("invoice-verified legs contribute exactly zero to metered_usd", () => {
   const payload = buildEvalRunPayload({
     runId: "12345-1",
-    pr: 756,
+    pr: 101,
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [
       {
         model: "claude",
         ok: true,
+        plan: true,
         usage: { input: 100, output: 20 },
         costUsd: 9.99,
       },
@@ -1643,12 +1644,12 @@ test("invoice-verified legs contribute exactly zero to metered_usd", () => {
 test("unverified plan legs still contribute exactly zero to metered_usd", () => {
   const payload = buildEvalRunPayload({
     runId: "12345-1",
-    pr: 756,
+    pr: 101,
     ranAtUtc: "2026-07-28T15:00:00.000Z",
     legs: [
-      { model: "claude", ok: true, usage: { input: 100, output: 20 }, costUsd: 9.99 },
-      { model: "fable", ok: true, usage: { input: 100, output: 20 }, costUsd: 8.88 },
-      { model: "openai", ok: true, usage: { input: 100, output: 20 }, costUsd: 7.77 },
+      { model: "claude", ok: true, plan: true, usage: { input: 100, output: 20 }, costUsd: 9.99 },
+      { model: "fable", ok: true, plan: true, usage: { input: 100, output: 20 }, costUsd: 8.88 },
+      { model: "openai", ok: true, plan: true, usage: { input: 100, output: 20 }, costUsd: 7.77 },
     ],
     billing: { state: "unverified" },
     openaiBilling: { state: "unverified" },
@@ -1835,7 +1836,7 @@ test("a partial-success response says the ledger is safe and cost_log failed", a
 test("final verdict PATCH carries only billing and per-model provenance", async () => {
   const payload = buildEvalRunVerdictPayload({
     legs: [
-      { model: "claude", ok: true, costUsd: 0 },
+      { model: "claude", ok: true, plan: true, costUsd: 0 },
       { model: "gemini", ok: true, costUsd: 0.01 },
     ],
     billing: { state: "verified-plan" },
@@ -1908,7 +1909,7 @@ test("a throwing payload builder fails soft and the review comment still renders
         {
           githubRunId: "12345",
           githubRunAttempt: "2",
-          pr: 756,
+          pr: 101,
           ranAtUtc: "2026-07-28T15:00:00.000Z",
           legs: [],
         },
@@ -1959,12 +1960,12 @@ function postPostEvalRun(runId, usd) {
   // settled, so the plan legs are unverified while Gemini has its token estimate.
   return buildEvalRunPayload({
     runId,
-    pr: 691,
+    pr: 102,
     ranAtUtc: "2026-07-30T12:00:00.000Z",
     legs: [
-      { model: "claude", ok: true, costUsd: 0, usage: { input: 0, output: 0 } },
-      { model: "fable", ok: true, costUsd: 0, usage: { input: 0, output: 0 } },
-      { model: "openai", ok: true, costUsd: 0, usage: { input: 0, output: 0 } },
+      { model: "claude", ok: true, plan: true, costUsd: 0, usage: { input: 0, output: 0 } },
+      { model: "fable", ok: true, plan: true, costUsd: 0, usage: { input: 0, output: 0 } },
+      { model: "openai", ok: true, plan: true, costUsd: 0, usage: { input: 0, output: 0 } },
       { model: "gemini", ok: true, costUsd: usd, usage: { input: 1, output: 1 } },
     ],
   });
@@ -2040,7 +2041,7 @@ test("a known total names an unrecognised ledger leg", () => {
 test("ledger read uses the authenticated PR query and fails visibly", async () => {
   let request;
   const complete = await fetchEvalPrRunningTotal({
-    pr: 770,
+    pr: 103,
     currentRunId: "101-1",
     evalRunUrl: "https://example.test/eval-run",
     evalRunSecret: "cron-secret",
@@ -2060,7 +2061,7 @@ test("ledger read uses the authenticated PR query and fails visibly", async () =
   assert.equal(request.options.headers.Authorization, "Bearer cron-secret");
 
   const failed = await fetchEvalPrRunningTotal({
-    pr: 770,
+    pr: 103,
     currentRunId: "101-1",
     evalRunUrl: "https://example.test/eval-run",
     evalRunSecret: "cron-secret",
@@ -2234,7 +2235,7 @@ test("metered lock: no key at all is a different, equally silent exit", async ()
 // Fail-open turned it into exit 0 with no comment, which is the worst shape of failure:
 // green, silent, and useless. These pin every state by name.
 test("ledger states: an unconfigured ledger renders nothing and carries no number", () => {
-  const md = renderComment([], [{ model: "openai", ok: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0 }],
+  const md = renderComment([], [{ model: "openai", ok: true, plan: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0 }],
     { evalRunningTotal: { state: "unconfigured" } });
   assert.doesNotMatch(md, /PR running total/, "an opt-in feature nobody enabled is not a row");
   assert.doesNotMatch(md, /incomplete/i, "and it is certainly not an error");
@@ -2246,7 +2247,7 @@ test("ledger states: every state renderComment accepts survives without a numeri
       ? { state, usd: 1.5, rounds: 2 }
       : { state, detail: "why" };
     assert.doesNotThrow(
-      () => renderComment([], [{ model: "openai", ok: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0 }], { evalRunningTotal: running }),
+      () => renderComment([], [{ model: "openai", ok: true, plan: true, findings: [], usage: { input: 1, output: 1 }, costUsd: 0 }], { evalRunningTotal: running }),
       `renderComment must not throw on state "${state}"`
     );
   }
@@ -2354,4 +2355,33 @@ test("ALLOW_METERED is exact: near-misses do not arm billing", () => {
     if (v.trim().toLowerCase() === "true") assert.equal(mode, "metered", `${JSON.stringify(v)} should arm`);
     else assert.equal(mode, "none", `${JSON.stringify(v)} must NOT arm billing`);
   }
+});
+
+test("a pay-per-call leg is NEVER zeroed in the immutable cost ledger", () => {
+  // The bug the pay-per-call change introduced and this pins shut: the ledger branch for
+  // claude/fable/openai zeroed unconditionally, under a comment saying those legs are
+  // "structurally plan-covered". True until a metered route existed, false the moment it
+  // did — and it would have written $0 for a run that really billed, which is the exact
+  // hard-zeroed-unmeasured-cost pattern this module exists to abolish.
+  const payload = buildEvalRunPayload({
+    runId: "metered-1",
+    pr: 1,
+    ranAtUtc: "2026-08-03T10:00:00.000Z",
+    legs: [
+      { model: "claude", ok: true, plan: false, usage: { input: 100, output: 20 }, costUsd: 1.23 },
+      { model: "openai", ok: true, plan: false, usage: { input: 100, output: 20 }, costUsd: 0.45 },
+      { model: "fable", ok: true, plan: true, usage: { input: 100, output: 20 }, costUsd: 9.99 },
+    ],
+    billing: { state: "unverified" },
+    openaiBilling: { state: "unverified" },
+  });
+  const byModel = Object.fromEntries(payload.legs.map((l) => [l.model, l]));
+
+  assert.equal(byModel.claude.usd, 1.23, "a billed Claude leg reports what it spent");
+  assert.equal(byModel.claude.provenance, "estimated-from-tokens");
+  assert.equal(byModel.openai.usd, 0.45);
+  assert.equal(byModel.openai.provenance, "estimated-from-tokens");
+  // And the plan leg is still zeroed, so the fix did not simply stop zeroing everything.
+  assert.equal(byModel.fable.usd, 0, "a subscription leg's token estimate is not spend");
+  assert.equal(payload.metered_usd, 1.68, "the run's metered total is the sum of what was actually billed");
 });
