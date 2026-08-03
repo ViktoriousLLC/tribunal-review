@@ -4,7 +4,7 @@
 
 Not another API key with a meter running. If you have a Claude subscription and a ChatGPT subscription, you already have everything two of the three review legs need, and they add nothing to your bill. The only optionally-metered leg is Gemini, and it stays off until you set `ALLOW_METERED=true` on purpose. **Any one** of the three is enough to get a review; you do not need all of them.
 
-**No subscription? Use an API key.** `init` asks that as a follow-up, and only if you said you have no subscription for that vendor, so you never end up configuring both and wondering which one is being charged. Pay-per-call legs report what they actually spent, priced from their own token counts.
+**No subscription? Use an API key.** `init` asks that as a follow-up, and only if you said you have no subscription for that vendor, so you never end up configuring both and wondering which one is being charged. Pay-per-call legs report an estimate of what they spent, priced from their own token counts. It is labelled as an estimate everywhere it appears, because it is not checked against the provider invoice.
 
 **How that avoids the trap it looks like.** `ANTHROPIC_API_KEY` outranks the subscription token in the Claude CLI's own auth order, so an environment holding both silently bills the key while everything reports "plan". That is exactly how this panel spent about $62 in nine days while printing `$0.0000 (plan)` on every pull request. The protection is mechanical rather than a warning: one function decides the mode and forwards **exactly one** credential, and **the subscription always wins**. The environment that caused the incident cannot be constructed. And no key bills anything until you also set `ALLOW_METERED=true`, so a key sitting in your secrets is inert.
 
@@ -60,7 +60,7 @@ gh workflow run tribunal.yml -f pr_number=42
 | You have | Legs that run | What the comment says |
 |---|---|---|
 | Nothing | none | it still posts a comment, naming every leg that could not run and what would enable it. Exits 0, no red X on your PR. |
-| Only API keys, plus `ALLOW_METERED=true` | the same legs your keys cover, billed per call | reports what each leg actually spent, from its token counts |
+| Only API keys, plus `ALLOW_METERED=true` | the same legs your keys cover, billed per call | reports a token-based ESTIMATE of what each leg spent, never called verified |
 | A Claude subscription | reviewer + judge | names the legs that did not run, and why |
 | Claude + a ChatGPT subscription usable by the Codex CLI | two reviewers + judge | same |
 | The above plus a Gemini API key **and** `ALLOW_METERED=true` | three reviewers + judge | states that the metered leg ran and across how many billed attempts. The dollar figure stays in the CI log, not in a public comment |

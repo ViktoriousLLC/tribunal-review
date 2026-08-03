@@ -62,7 +62,7 @@ export function secretCommands({ claude, gpt, gemini, billing }) {
   if (gemini !== "none") wanted.push("GEMINI_API_KEY");
   // Per leg. Asking someone to create an OpenAI org admin key to verify a leg they never
   // enabled is asking for a credential that does nothing. The admin keys verify a PLAN
-  // claim against the invoice; a pay-per-call leg reports what it spent from its own token
+  // claim against the invoice; a pay-per-call leg reports a token-priced ESTIMATE of what it spent from its own
   // counts, so there is no plan claim to check and no reason to ask for the key.
   if (billing === "yes" && claude === "plan") wanted.push("ANTHROPIC_ADMIN_KEY");
   if (billing === "yes" && gpt === "plan") wanted.push("OPENAI_ADMIN_KEY");
@@ -98,7 +98,7 @@ function meteredWarning(vendor, keyEnv, planEnv) {
   console.log("  │  no monthly ceiling. Set one on the vendor's own dashboard if you");
   console.log("  │  want a floor under how wrong this can go.");
   console.log("  │");
-  console.log("  │  Every run reports what it actually cost, in the pull request comment");
+  console.log("  │  Every run reports an ESTIMATE of what it cost, in the pull request comment");
   console.log("  │  and in the run log. Read the first one before you dispatch a second.");
   console.log("  │");
   console.log("  │  TO STOP BILLING, either is enough and both take effect immediately:");
@@ -398,8 +398,9 @@ async function init() {
     console.log("than as zero. That is deliberate: an unmeasured run is never reported as free.");
   }
   if (claude === "metered" || gpt === "metered") {
-    console.log("Your pay-per-call legs report what they actually spent, priced from their own");
-    console.log("token counts. That number is real; it is simply not checked against an invoice.");
+    console.log("Your pay-per-call legs report an ESTIMATE of what they spent, priced from their");
+    console.log("own token counts. It is not checked against the provider's invoice, so treat it");
+    console.log("as close rather than exact. The provider's dashboard is the number that counts.");
   }
   console.log("\nThen open a pull request and run:  gh workflow run tribunal.yml -f pr_number=<n>\n");
   return 0;

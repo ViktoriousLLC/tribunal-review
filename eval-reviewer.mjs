@@ -2089,6 +2089,23 @@ function codexNeutralCwd() {
   return codexNeutralCwdDir;
 }
 
+// A throwaway, empty CODEX_HOME for the pay-per-call route, made once per process and
+// removed on exit. Empty is the whole point: there must be no auth.json in it.
+let meteredCodexHomeDir = null;
+function emptyCodexHome() {
+  if (!meteredCodexHomeDir) {
+    meteredCodexHomeDir = mkdtempSync(join(tmpdir(), "tribunal-codex-metered-"));
+    process.once("exit", () => {
+      try {
+        rmSync(meteredCodexHomeDir, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    });
+  }
+  return meteredCodexHomeDir;
+}
+
 export function codexAuthMode(source = process.env) {
   return legAuthMode({
     planPresent: codexHomeIsSeeded(source),
@@ -2103,11 +2120,20 @@ export function codexCliEnv(source = process.env) {
   // Windows needs these for the CLI to resolve its own home; harmless on Linux CI.
   if (source.USERPROFILE) env.USERPROFILE = source.USERPROFILE;
   const mode = codexAuthMode(source);
-  // EXACTLY ONE, same rule as the Claude legs. On the plan the key is absent, so the CLI
-  // cannot reach for it; on the metered route CODEX_HOME is absent, so the CLI cannot fall
-  // back to a plan credential this process never sanitised.
-  if (mode === "plan") env.CODEX_HOME = source.CODEX_HOME;
-  else if (mode === "metered") env.OPENAI_API_KEY = source.OPENAI_API_KEY;
+  // EXACTLY ONE, same rule as the Claude legs.
+  if (mode === "plan") {
+    env.CODEX_HOME = source.CODEX_HOME;
+  } else if (mode === "metered") {
+    env.OPENAI_API_KEY = source.OPENAI_API_KEY;
+    // An EMPTY home, not merely an absent CODEX_HOME. Omitting it is not enough: HOME is
+    // forwarded (the CLI needs one), and Codex falls back to $HOME/.codex/auth.json, which
+    // on any developer machine is exactly where a plan credential lives. That would put a
+    // stored plan credential and an API key in one process — the precise thing the
+    // exactly-one rule exists to prevent, reintroduced by the route that added the key.
+    // Pointing at a fresh empty directory means there is no auth.json to find.
+    // (The panel's own GPT leg caught this, on its own review of this change.)
+    env.CODEX_HOME = emptyCodexHome();
+  }
   // NOTE the absence of GH_TOKEN / GEMINI_API_KEY / EVAL_RUN_SECRET in every mode. This
   // process is an LLM reading an UNTRUSTED diff; it gets one credential and nothing else.
   return env;

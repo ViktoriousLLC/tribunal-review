@@ -3,7 +3,7 @@
 // side-effect-free). Run: node --test .github/ci/eval-reviewer.test.mjs
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
   parseLenientJson,
@@ -1122,10 +1122,14 @@ test("No seeded CODEX_HOME, no leg — the no-metered guarantee is enforced, not
   // reach a plan credential and a plan run can never reach a key. Asserted behaviourally
   // rather than by grepping the source, which is the stronger form.
   assert.equal(codexCliEnv({ CODEX_HOME: "/seeded" }).CODEX_HOME, "/seeded");
-  assert.ok(
-    !("CODEX_HOME" in codexCliEnv({ OPENAI_API_KEY: "sk", ALLOW_METERED: "true" })),
-    "a metered run must not inherit a plan credential path"
-  );
+  {
+    // Not merely absent: pointed at an EMPTY home of our own. Absent was the first
+    // attempt and it was not enough, because HOME is still forwarded and Codex falls
+    // back to $HOME/.codex/auth.json.
+    const m = codexCliEnv({ HOME: "INHERITED-HOME-FIXTURE", OPENAI_API_KEY: "sk", ALLOW_METERED: "true" });
+    assert.notEqual(m.CODEX_HOME, "INHERITED-HOME-FIXTURE", "a metered run must not inherit a plan credential path");
+    assert.equal(readdirSync(m.CODEX_HOME).length, 0, "and the home it does get must be empty");
+  }
   assert.ok(
     !("OPENAI_API_KEY" in codexCliEnv({ CODEX_HOME: "/seeded", OPENAI_API_KEY: "sk", ALLOW_METERED: "true" })),
     "a plan run must not carry a key the CLI could prefer"
@@ -2328,9 +2332,10 @@ test("the GPT leg follows the identical rule, and never mixes its two credential
   assert.equal(codexAuthMode(metered), "metered");
   const env = codexCliEnv(metered);
   assert.equal(env.OPENAI_API_KEY, "sk-metered");
-  assert.ok(
-    !("CODEX_HOME" in env),
-    "without CODEX_HOME the CLI cannot fall back to a plan credential this process never sanitised"
+  assert.equal(
+    readdirSync(env.CODEX_HOME).length,
+    0,
+    "an EMPTY CODEX_HOME, so the CLI cannot fall back to a plan credential this process never sanitised"
   );
 });
 
@@ -2384,4 +2389,17 @@ test("a pay-per-call leg is NEVER zeroed in the immutable cost ledger", () => {
   // And the plan leg is still zeroed, so the fix did not simply stop zeroing everything.
   assert.equal(byModel.fable.usd, 0, "a subscription leg's token estimate is not spend");
   assert.equal(payload.metered_usd, 1.68, "the run's metered total is the sum of what was actually billed");
+});
+
+test("a pay-per-call GPT run gets an EMPTY home, not merely a missing one", () => {
+  // The panel's own GPT leg caught this on its review of the change that caused it.
+  // Omitting CODEX_HOME is not enough: HOME is forwarded because the CLI needs one, and
+  // Codex then falls back to $HOME/.codex/auth.json — which on a developer machine is
+  // exactly where a plan credential lives. That would put a stored plan credential and an
+  // API key in one process, which is precisely what the exactly-one rule forbids.
+  const env = codexCliEnv({ HOME: "INHERITED-HOME-FIXTURE", OPENAI_API_KEY: "sk", ALLOW_METERED: "true" });
+  assert.equal(env.OPENAI_API_KEY, "sk");
+  assert.ok(env.CODEX_HOME, "a metered run must be pointed at a home of our choosing");
+  assert.notEqual(env.CODEX_HOME, "INHERITED-HOME-FIXTURE", "and it must not be the inherited one");
+  assert.equal(readdirSync(env.CODEX_HOME).length, 0, "that home must be EMPTY — no auth.json to find");
 });
