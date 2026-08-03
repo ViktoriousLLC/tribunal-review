@@ -75,8 +75,21 @@ jobs:
       # because someone published a new version this morning. Installed into a scratch
       # prefix, never into the repo, so a consumer's lockfile, private registry, or
       # postinstall scripts are not dragged into the review job.
+      #
+      # TRIBUNAL_PACKAGE lets you point this at something other than the npm release: a
+      # git ref, a local path, a tarball. That exists because the first real dispatch of
+      # this workflow died here, on `npm error 404 tribunal-review@0.1.0 is not in this
+      # registry` — the package had not been published yet, so a workflow that reads
+      # perfectly cannot run at all. Two review rounds could not see that, because it is a
+      # fact about a registry rather than about the file.
       - name: Install the Tribunal panel
-        run: npm install --no-save --prefix "$RUNNER_TEMP/tribunal" tribunal-review@0.1.0
+        env:
+          TRIBUNAL_PACKAGE: ${{ vars.TRIBUNAL_PACKAGE || 'tribunal-review@0.1.0' }}
+        run: |
+          if ! npm install --no-save --prefix "$RUNNER_TEMP/tribunal" "$TRIBUNAL_PACKAGE"; then
+            echo "::error title=Tribunal could not be installed::Could not install '$TRIBUNAL_PACKAGE'. If that is the npm release, it may not be published yet. Set the repository variable TRIBUNAL_PACKAGE to a git ref or tarball to run a pre-release build: gh variable set TRIBUNAL_PACKAGE --body 'github:OWNER/REPO#main'"
+            exit 1
+          fi
       # Concurrency only cancels in-flight runs, so a completed re-dispatch of the same
       # head SHA would pay for a full second review. This stops before the EXPENSIVE
       # installs (the provider CLIs and the metered SDK) and before any model call.

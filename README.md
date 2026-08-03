@@ -12,6 +12,13 @@ What it does with the diff, since you asked: several models review it independen
 
 ## The first five minutes
 
+> **Not on npm yet.** Until it is, `npx tribunal-review` has nothing to fetch. Run the CLI
+> straight from a clone (`node bin/tribunal.mjs init`), and point the workflow at a
+> checkout instead of the registry:
+> `gh variable set TRIBUNAL_PACKAGE --body 'github:OWNER/REPO#main'`.
+> The workflow prints exactly that command if the install step fails, rather than leaving
+> you with a bare npm 404.
+
 ```
 npx tribunal-review init
 ```
