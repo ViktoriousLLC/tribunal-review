@@ -84,7 +84,7 @@ Node 20 or newer, the GitHub CLI for the setup commands, and a GitHub repository
 - **The diff is truncated** past a size limit. On a very large pull request the models see part of it, so an empty finding list on a huge diff means less than it looks like.
 - **The Codex CLI version is pinned** because the parser is coupled to that version's JSON event shape. A newer CLI may break the GPT leg.
 - **Codex plan tokens rotate roughly every eight days** and the runner is ephemeral, so the stored secret eventually goes stale. When it does, the GPT leg fails loudly in the comment with the exact refresh command. It never falls back to a credit card.
-- **Comments carry ticket ids from the repository this came out of.** They resolve to nothing public. They are kept because the reasoning in those comments is the useful part.
+- **The comments explain real incidents.** Most of them describe something that actually went wrong once, which is why they are long. The internal ticket ids they used to carry have been removed; the reasoning is the part worth keeping.
 
 ## If your setup differs
 
