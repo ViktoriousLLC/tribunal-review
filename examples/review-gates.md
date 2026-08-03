@@ -36,3 +36,7 @@ Delete every line below that does not apply to you.
 Report blockers, suggestions, and nits, in that order. Say what is wrong, why it
 matters, and the smallest fix. Do not invent findings to fill space. If the diff
 is clean, say so and stop.
+
+- **Silent success is the worst outcome.** A check that cannot tell whether it ran must
+  fail loudly, never exit zero. Flag any code path that can report a pass without having
+  done the work.
