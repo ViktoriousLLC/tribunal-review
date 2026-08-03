@@ -61,6 +61,9 @@ import {
   summarizeEvalRunRows,
   fetchEvalPrRunningTotal,
   INCOMPLETE_EVAL_TOTAL,
+  claudeAuthMode,
+  codexAuthMode,
+  noCredentialMessage,
 } from "./eval-reviewer.mjs";
 import { isDirectInvocation } from "./entrypoint.mjs";
 
@@ -1106,9 +1109,24 @@ test("No seeded CODEX_HOME, no leg — the no-metered guarantee is enforced, not
   assert.equal(codexHomeIsSeeded({ HOME: "/home/runner" }), false);
   assert.equal(codexHomeIsSeeded({ HOME: "/home/runner", CODEX_HOME: "" }), false);
   assert.equal(codexHomeIsSeeded({ CODEX_HOME: "/home/runner/.codex-ci" }), true);
+  // The guarantee MOVED rather than weakened. It used to be "runCodex refuses without a
+  // seeded CODEX_HOME"; now that a pay-per-call route exists, the honest invariant is that
+  // codexCliEnv forwards CODEX_HOME on the plan route ONLY, so a metered run can never
+  // reach a plan credential and a plan run can never reach a key. Asserted behaviourally
+  // rather than by grepping the source, which is the stronger form.
+  assert.equal(codexCliEnv({ CODEX_HOME: "/seeded" }).CODEX_HOME, "/seeded");
+  assert.ok(
+    !("CODEX_HOME" in codexCliEnv({ OPENAI_API_KEY: "sk", ALLOW_METERED: "true" })),
+    "a metered run must not inherit a plan credential path"
+  );
+  assert.ok(
+    !("OPENAI_API_KEY" in codexCliEnv({ CODEX_HOME: "/seeded", OPENAI_API_KEY: "sk", ALLOW_METERED: "true" })),
+    "a plan run must not carry a key the CLI could prefer"
+  );
   const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
   const body = src.slice(src.indexOf("async function runCodex"), src.indexOf("export async function callGeminiModel"));
-  assert.match(body, /codexHomeIsSeeded\(\)/, "runCodex must refuse an unseeded credential before spawning");
+  assert.match(body, /codexAuthMode\(\)/, "runCodex must decide its credential mode before spawning");
+  assert.match(body, /mode === "none"/, "and refuse outright when it has neither credential");
 });
 
 test("The Codex spawn is ASYNC — a multi-minute sync child would freeze Gemini's retry timers", () => {
@@ -2261,4 +2279,72 @@ test("an unresolvable path falls back rather than silently deciding not to run",
     throw new Error("ENOENT");
   };
   assert.equal(isDirectInvocation(real, pathToFileURL(real).href, throwing), true);
+});
+
+// ---------- the pay-per-call route ----------
+// Added so somebody with an API key and no subscription can use the tool at all. The
+// safety property it must NOT break: the $62 incident needed BOTH credentials in one
+// environment, because the API key outranks the plan token in the CLI's own auth order.
+// These pin that such an environment cannot be built.
+
+test("the plan always wins, so both credentials can never be in one environment", () => {
+  const both = {
+    CLAUDE_CODE_OAUTH_TOKEN: "plan-token",
+    ANTHROPIC_API_KEY: "sk-metered",
+    ALLOW_METERED: "true",
+    PATH: "/usr/bin",
+  };
+  assert.equal(claudeAuthMode(both), "plan");
+  const env = claudeCliEnv(both);
+  assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "plan-token");
+  assert.ok(!("ANTHROPIC_API_KEY" in env), "the key must not ride along with the plan token — that is the $62 environment");
+});
+
+test("a key alone never bills: ALLOW_METERED is a second, separate lock", () => {
+  const keyOnly = { ANTHROPIC_API_KEY: "sk-metered", PATH: "/usr/bin" };
+  assert.equal(claudeAuthMode(keyOnly), "none");
+  assert.ok(!("ANTHROPIC_API_KEY" in claudeCliEnv(keyOnly)));
+
+  const armed = { ...keyOnly, ALLOW_METERED: "true" };
+  assert.equal(claudeAuthMode(armed), "metered");
+  assert.equal(claudeCliEnv(armed).ANTHROPIC_API_KEY, "sk-metered");
+  assert.ok(!("CLAUDE_CODE_OAUTH_TOKEN" in claudeCliEnv(armed)));
+});
+
+test("the GPT leg follows the identical rule, and never mixes its two credentials", () => {
+  const both = { CODEX_HOME: "/home/runner/.codex-ci", OPENAI_API_KEY: "sk-metered", ALLOW_METERED: "true" };
+  assert.equal(codexAuthMode(both), "plan");
+  assert.ok(!("OPENAI_API_KEY" in codexCliEnv(both)));
+
+  const metered = { OPENAI_API_KEY: "sk-metered", ALLOW_METERED: "true" };
+  assert.equal(codexAuthMode(metered), "metered");
+  const env = codexCliEnv(metered);
+  assert.equal(env.OPENAI_API_KEY, "sk-metered");
+  assert.ok(
+    !("CODEX_HOME" in env),
+    "without CODEX_HOME the CLI cannot fall back to a plan credential this process never sanitised"
+  );
+});
+
+test("no credential at all still means no environment, and no call", () => {
+  assert.equal(claudeAuthMode({ ALLOW_METERED: "true" }), "none");
+  assert.equal(codexAuthMode({ ALLOW_METERED: "true" }), "none");
+  const env = claudeCliEnv({ ALLOW_METERED: "true", PATH: "/usr/bin" });
+  assert.deepEqual(Object.keys(env).sort(), ["CI", "HOME", "PATH"]);
+});
+
+test("the no-credential message names BOTH ways to enable the leg", () => {
+  const m = noCredentialMessage("Claude", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY");
+  assert.ok(m.includes("CLAUDE_CODE_OAUTH_TOKEN"));
+  assert.ok(m.includes("ANTHROPIC_API_KEY"));
+  assert.ok(m.includes("ALLOW_METERED"), "somebody with only a key needs to be told about the second lock");
+  assert.ok(m.includes("Nothing was billed"));
+});
+
+test("ALLOW_METERED is exact: near-misses do not arm billing", () => {
+  for (const v of ["TRUE", "True", "1", "yes", "true ", ""]) {
+    const mode = claudeAuthMode({ ANTHROPIC_API_KEY: "sk", ALLOW_METERED: v });
+    if (v.trim().toLowerCase() === "true") assert.equal(mode, "metered", `${JSON.stringify(v)} should arm`);
+    else assert.equal(mode, "none", `${JSON.stringify(v)} must NOT arm billing`);
+  }
 });

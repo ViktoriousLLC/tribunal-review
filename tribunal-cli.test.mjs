@@ -62,3 +62,34 @@ test("no credentials chosen means no commands, not a broken list", () => {
   assert.deepEqual(wanted, []);
   assert.deepEqual(lines, []);
 });
+
+// The pay-per-call route, asked only of people who said they have no subscription.
+test("choosing an API key asks for the key, not the subscription token", () => {
+  const { wanted, lines } = secretCommands({
+    claude: "metered",
+    gpt: "metered",
+    gemini: "none",
+    billing: "no",
+  });
+  assert.deepEqual(wanted, ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+  assert.ok(!wanted.includes("CLAUDE_CODE_OAUTH_TOKEN"));
+  assert.ok(!wanted.includes("CODEX_AUTH_JSON"));
+  assert.ok(
+    lines.some((l) => l.includes("ALLOW_METERED --body true")),
+    "anything billed needs the second lock, whichever leg it is"
+  );
+});
+
+test("a mixed setup asks for exactly the credentials that setup uses", () => {
+  // A subscription for one vendor and a key for the other is a real shape, and the two
+  // must never both be requested for the same leg.
+  const { wanted } = secretCommands({ claude: "plan", gpt: "metered", gemini: "none", billing: "yes" });
+  assert.deepEqual(wanted, ["CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_ADMIN_KEY"]);
+  assert.ok(!wanted.includes("ANTHROPIC_API_KEY"), "the Claude leg is on the plan; its key would never be read");
+  assert.ok(!wanted.includes("OPENAI_ADMIN_KEY"), "there is no plan claim to verify for a pay-per-call leg");
+});
+
+test("no billed leg means no ALLOW_METERED line at all", () => {
+  const { lines } = secretCommands({ claude: "plan", gpt: "plan", gemini: "none", billing: "no" });
+  assert.ok(!lines.some((l) => l.includes("ALLOW_METERED")));
+});

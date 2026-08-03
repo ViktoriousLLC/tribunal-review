@@ -1844,12 +1844,40 @@ function claudeNeutralCwd() {
  * a real secret gap: the leg is an LLM reading an UNTRUSTED diff and had GH_TOKEN /
  * OPENAI_API_KEY / GEMINI_API_KEY / EVAL_RUN_SECRET sitting in its environment.
  */
+/**
+ * Which credential a leg will actually authenticate with: "plan", "metered", or "none".
+ *
+ * THE PLAN ALWAYS WINS. Not as a preference — as the mechanism. The $62 incident needed
+ * BOTH credentials present in one environment, because the API key outranks the plan token
+ * in the CLI's own auth order. Deciding the mode here, and forwarding exactly one
+ * credential, means that environment cannot be constructed. A subscription holder who also
+ * has an API key lying around is unaffected: they get the plan, free, as before.
+ *
+ * The metered route exists because refusing to run at all for somebody who has an API key
+ * and no subscription helps nobody. It is behind the same two locks as the Gemini leg: the
+ * key, AND an explicit ALLOW_METERED opt-in. A key alone never starts billing anyone.
+ */
+export function legAuthMode({ planPresent, apiKey, env = process.env }) {
+  if (planPresent) return "plan";
+  if (meteredLegAllowed(env) && apiKey) return "metered";
+  return "none";
+}
+
+export function claudeAuthMode(source = process.env) {
+  return legAuthMode({
+    planPresent: !!source.CLAUDE_CODE_OAUTH_TOKEN,
+    apiKey: source.ANTHROPIC_API_KEY,
+    env: source,
+  });
+}
+
 export function claudeCliEnv(source = process.env) {
   const env = { PATH: source.PATH, HOME: source.HOME, CI: "true" };
-  if (source.CLAUDE_CODE_OAUTH_TOKEN) env.CLAUDE_CODE_OAUTH_TOKEN = source.CLAUDE_CODE_OAUTH_TOKEN;
-  // The Claude-family legs are handed an env that CANNOT contain an API key, no matter
-  // what is configured. Losing the plan credential must drop a leg loudly, because an
-  // automatic card fallback is how a capability failure becomes invisible spend.
+  const mode = claudeAuthMode(source);
+  // EXACTLY ONE, never both. This is the whole guarantee, and it is a property of this
+  // function rather than a rule somebody has to remember at each call site.
+  if (mode === "plan") env.CLAUDE_CODE_OAUTH_TOKEN = source.CLAUDE_CODE_OAUTH_TOKEN;
+  else if (mode === "metered") env.ANTHROPIC_API_KEY = source.ANTHROPIC_API_KEY;
   return env;
 }
 
@@ -1930,12 +1958,20 @@ async function callClaudeCli(model, system, user) {
   return { ...parsed, apiModel: model, plan: true };
 }
 
+/** The message when a leg has neither credential, naming BOTH ways to enable it. */
+export function noCredentialMessage(legName, planEnv, keyEnv) {
+  return (
+    `The ${legName} leg did not run: no credential. Either set ${planEnv} to run it on a ` +
+    `subscription at no per-call cost, or set ${keyEnv} together with ALLOW_METERED=true to ` +
+    "run it pay-per-call. Nothing was billed."
+  );
+}
+
 async function runClaude(system, user) {
-  const onPlan = !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  // With no plan token the Opus leg is SKIPPED, never bought. It used to fall
-  // through to the metered API here.
-  if (!onPlan) {
-    return { model: "claude", ok: false, error: "The Claude leg is plan-only by policy and CLAUDE_CODE_OAUTH_TOKEN is not set — leg skipped, never billed", findings: [], usage: { input: 0, output: 0 }, costUsd: 0 };
+  const mode = claudeAuthMode();
+  // With neither credential the Opus leg is SKIPPED, never bought.
+  if (mode === "none") {
+    return { model: "claude", ok: false, error: noCredentialMessage("Claude", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"), findings: [], usage: { input: 0, output: 0 }, costUsd: 0 };
   }
   // Model ladder: the plan/free model (Opus) first; if (and only if) the id itself
   // is rejected, one retry on the fallback. finalizeLeg records which model served
@@ -1948,12 +1984,14 @@ async function runClaude(system, user) {
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
     try {
-      // Opus is PLAN-ONLY, by policy, forever. There is no metered branch here
-      // any more — not an unconfigured one, not a guarded one. claudeCliEnv() cannot
-      // hand this process an API key even if one exists in the environment.
+      // claudeCliEnv decided the mode and forwarded exactly ONE credential, so this
+      // cannot be a plan run that quietly billed.
       const leg = finalizeLeg("claude", await withRetry(() => callClaudeCli(model, system, user)));
-      leg.plan = true; // guaranteed: the env it ran with had no API key in it
-      leg.costUsd = 0;
+      leg.plan = mode === "plan";
+      // Zero ONLY on the plan. finalizeLeg already priced the tokens; overwriting that on
+      // a metered run would be this file's own cardinal sin, reporting a cost it did not
+      // measure. A metered run reports what it actually spent.
+      if (mode === "plan") leg.costUsd = 0;
       return leg;
     } catch (e) {
       lastErr = e;
@@ -1967,8 +2005,8 @@ async function runClaude(system, user) {
 // The 4th judge: Fable 5 on the Max plan. Its findings ride the "fable" machine key
 // end to end. A plan failure drops the leg loudly; no metered fallback exists.
 export async function runFable(system, user) {
-  const onPlan = !!process.env.CLAUDE_CODE_OAUTH_TOKEN;
-  if (!onPlan) {
+  const mode = claudeAuthMode();
+  if (mode === "none") {
     return { model: "fable", ok: false, error: fableNoCredentialMessage(), findings: [], usage: { input: 0, output: 0 }, costUsd: 0 };
   }
   try {
@@ -1981,8 +2019,8 @@ export async function runFable(system, user) {
     // silently shrink the panel to three readers. The Opus leg retries the identical call
     // shape. Caught by the Fable leg reviewing its own deletion, which no other model saw.
     const leg = finalizeLeg("fable", await withRetry(() => callClaudeCli(FABLE_MODEL, system, user)));
-    leg.plan = true;
-    leg.costUsd = 0;
+    leg.plan = mode === "plan";
+    if (mode === "plan") leg.costUsd = 0;
     return leg;
   } catch (e) {
     // A lost leg must not dissolve into a generic count. Report the CLI's actual error
@@ -2035,14 +2073,27 @@ function codexNeutralCwd() {
   return codexNeutralCwdDir;
 }
 
+export function codexAuthMode(source = process.env) {
+  return legAuthMode({
+    planPresent: codexHomeIsSeeded(source),
+    apiKey: source.OPENAI_API_KEY,
+    env: source,
+  });
+}
+
 /** The env the Codex CLI gets. Minimal on purpose — see the block comment above. */
 export function codexCliEnv(source = process.env) {
   const env = { PATH: source.PATH, HOME: source.HOME, CI: "true" };
-  if (source.CODEX_HOME) env.CODEX_HOME = source.CODEX_HOME;
   // Windows needs these for the CLI to resolve its own home; harmless on Linux CI.
   if (source.USERPROFILE) env.USERPROFILE = source.USERPROFILE;
-  // NOTE the absence of OPENAI_API_KEY, and of GH_TOKEN / GEMINI_API_KEY / EVAL_RUN_SECRET.
-  // This process is an LLM reading an UNTRUSTED diff; it gets no credentials at all.
+  const mode = codexAuthMode(source);
+  // EXACTLY ONE, same rule as the Claude legs. On the plan the key is absent, so the CLI
+  // cannot reach for it; on the metered route CODEX_HOME is absent, so the CLI cannot fall
+  // back to a plan credential this process never sanitised.
+  if (mode === "plan") env.CODEX_HOME = source.CODEX_HOME;
+  else if (mode === "metered") env.OPENAI_API_KEY = source.OPENAI_API_KEY;
+  // NOTE the absence of GH_TOKEN / GEMINI_API_KEY / EVAL_RUN_SECRET in every mode. This
+  // process is an LLM reading an UNTRUSTED diff; it gets one credential and nothing else.
   return env;
 }
 
@@ -2230,19 +2281,28 @@ async function callCodexCli(model, system, user) {
 
 async function runCodex(system, user) {
   try {
-    // Enforced, not asserted: without a seeded CODEX_HOME the CLI would fall back to
-    // $HOME/.codex/auth.json, which this process never sanitized and which can be
-    // api-key-authed. Refuse the leg rather than run one we cannot make that claim about.
-    if (!codexHomeIsSeeded()) throw new Error("CODEX_HOME is not set — the Codex plan credential was never seeded (auth)");
+    const mode = codexAuthMode();
+    // Enforced, not asserted. On the plan route a missing CODEX_HOME would let the CLI
+    // fall back to $HOME/.codex/auth.json, which this process never sanitized and which
+    // can be api-key-authed — so a plan claim about that run would be a guess. On the
+    // metered route CODEX_HOME is deliberately absent and the key is explicit.
+    if (mode === "none") {
+      throw new Error(
+        "no credential — the Codex plan credential was never seeded (CODEX_AUTH_JSON), and no " +
+          "OPENAI_API_KEY with ALLOW_METERED=true was offered either (auth)"
+      );
+    }
     const leg = finalizeLeg("openai", await withRetry(() => callCodexCli(CODEX_MODEL, system, user)));
-    // Free by CONSTRUCTION, not by inference: the env handed to that process could not
-    // contain an API key. main() still checks this against the OpenAI invoice.
-    leg.plan = true;
-    leg.costUsd = 0;
+    // Free by CONSTRUCTION on the plan, not by inference: the env handed to that process
+    // could not contain an API key. main() still checks this against the OpenAI invoice.
+    leg.plan = mode === "plan";
+    if (mode === "plan") leg.costUsd = 0;
     return leg;
   } catch (e) {
-    // A lost plan credential fails the leg loudly. There is deliberately no OpenAI API
-    // branch here: the only use of that switch was an accidental move onto a card.
+    // A lost credential fails the leg loudly rather than silently switching to the other
+    // one. There IS an OpenAI API route now, but it is chosen up front by codexAuthMode
+    // and only for somebody who has no plan credential at all — never as a fallback when
+    // the plan fails mid-run, which is how a capability failure turns into invisible spend.
     const msg = codexFailureMessage(e);
     console.warn(`  [!] ${msg}`);
     console.log(`::warning title=GPT leg did not run::${msg}`);

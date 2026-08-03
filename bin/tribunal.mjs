@@ -25,6 +25,12 @@ const CREDENTIALS = [
   { env: "CODEX_AUTH_JSON", kind: "plan", leg: "GPT reviewer",
     unlocks: "the GPT reviewer leg",
     how: "log into the Codex CLI, then upload the contents of ~/.codex/auth.json" },
+  { env: "ANTHROPIC_API_KEY", kind: "metered", leg: "Claude reviewer + judge (pay-per-call)",
+    unlocks: "the same Claude legs WITHOUT a subscription, billed per call",
+    how: "an Anthropic API key — only used when there is no subscription token, and only with ALLOW_METERED=true" },
+  { env: "OPENAI_API_KEY", kind: "metered", leg: "GPT reviewer (pay-per-call)",
+    unlocks: "the same GPT leg WITHOUT a subscription, billed per call",
+    how: "an OpenAI API key — only used when there is no Codex plan credential, and only with ALLOW_METERED=true" },
   { env: "GEMINI_API_KEY", kind: "metered", leg: "Gemini reviewer",
     unlocks: "the Gemini reviewer leg (this one is billed per call)",
     how: "create a key at Google AI Studio" },
@@ -50,10 +56,14 @@ function present(env) {
 export function secretCommands({ claude, gpt, gemini, billing }) {
   const wanted = [];
   if (claude === "plan") wanted.push("CLAUDE_CODE_OAUTH_TOKEN");
+  if (claude === "metered") wanted.push("ANTHROPIC_API_KEY");
   if (gpt === "plan") wanted.push("CODEX_AUTH_JSON");
+  if (gpt === "metered") wanted.push("OPENAI_API_KEY");
   if (gemini !== "none") wanted.push("GEMINI_API_KEY");
   // Per leg. Asking someone to create an OpenAI org admin key to verify a leg they never
-  // enabled is asking for a credential that does nothing.
+  // enabled is asking for a credential that does nothing. The admin keys verify a PLAN
+  // claim against the invoice; a pay-per-call leg reports what it spent from its own token
+  // counts, so there is no plan claim to check and no reason to ask for the key.
   if (billing === "yes" && claude === "plan") wanted.push("ANTHROPIC_ADMIN_KEY");
   if (billing === "yes" && gpt === "plan") wanted.push("OPENAI_ADMIN_KEY");
 
@@ -62,7 +72,9 @@ export function secretCommands({ claude, gpt, gemini, billing }) {
       ? `  gh secret set CODEX_AUTH_JSON < "$HOME/.codex/auth.json"`
       : `  gh secret set ${env}`
   );
-  if (gemini === "on") lines.push("  gh variable set ALLOW_METERED --body true");
+  // ONE switch arms every billed leg, and nothing bills without it. Two locks, always.
+  const anyMetered = gemini === "on" || claude === "metered" || gpt === "metered";
+  if (anyMetered) lines.push("  gh variable set ALLOW_METERED --body true");
   return { wanted, lines };
 }
 
@@ -128,10 +140,18 @@ async function doctorRepo(repoArg) {
   console.log("");
 
   // What will actually happen on the next dispatch, which is the thing they wanted to know.
+  // Mirrors legAuthMode in the reviewer: the plan wins, and a key only counts when the
+  // metered switch is on. If these two ever disagree, this one is the liar.
   const legs = [];
-  if (has("CLAUDE_CODE_OAUTH_TOKEN")) legs.push("claude-reviewer", "judge");
-  if (has("CODEX_AUTH_JSON")) legs.push("gpt-reviewer");
+  const billed = [];
+  const claudeMode = has("CLAUDE_CODE_OAUTH_TOKEN") ? "plan" : has("ANTHROPIC_API_KEY") && meteredOn ? "metered" : "none";
+  const gptMode = has("CODEX_AUTH_JSON") ? "plan" : has("OPENAI_API_KEY") && meteredOn ? "metered" : "none";
+  if (claudeMode !== "none") legs.push("claude-reviewer", "judge");
+  if (gptMode !== "none") legs.push("gpt-reviewer");
   if (has("GEMINI_API_KEY") && meteredOn) legs.push("gemini-reviewer");
+  if (claudeMode === "metered") billed.push("claude-reviewer + judge");
+  if (gptMode === "metered") billed.push("gpt-reviewer");
+  if (has("GEMINI_API_KEY") && meteredOn) billed.push("gemini-reviewer");
 
   if (legs.length === 0) {
     console.log("  Legs that will run on the next dispatch: NONE.");
@@ -140,9 +160,23 @@ async function doctorRepo(repoArg) {
   } else {
     console.log(`  Legs that will run on the next dispatch: ${legs.join(", ")}.`);
   }
-  if (!has("CLAUDE_CODE_OAUTH_TOKEN") && legs.length > 0) {
+  if (billed.length > 0) {
+    console.log(`  BILLED PER CALL: ${billed.join(", ")}. Everything else is on a subscription.`);
+  }
+  if (claudeMode === "none" && legs.length > 0) {
     console.log("  No judge: the blinded reconciliation pass is Claude-only, so you get each");
     console.log("  reviewer's findings and nothing that reconciles them.");
+  }
+  for (const [name, key, plan] of [
+    ["Claude", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+    ["GPT", "OPENAI_API_KEY", "CODEX_AUTH_JSON"],
+  ]) {
+    if (has(key) && has(plan)) {
+      console.log(`  Note: both ${plan} and ${key} are set. The ${name} legs will use the`);
+      console.log("  SUBSCRIPTION and the key will not be touched, so you are not being billed twice.");
+    } else if (has(key) && !meteredOn) {
+      console.log(`  ! ${key} is set but ALLOW_METERED is not "true", so the ${name} legs stay OFF.`);
+    }
   }
   if (has("GEMINI_API_KEY") && !meteredOn) {
     console.log("");
@@ -217,14 +251,31 @@ async function init() {
     "Nothing here asks for a secret VALUE. It only asks what you have, so it knows\n" +
     "which review legs to switch on. You paste the values into GitHub yourself.");
 
-  const claude = await ask(rl, "Claude access?", [
+  // The pay-per-call route is a FOLLOW-UP, asked only of people who said they have no
+  // subscription. That is not just kinder ordering: it is what makes the two modes
+  // mutually exclusive by construction, so nobody ends up configuring both and wondering
+  // which one is being charged.
+  let claude = await ask(rl, "Claude access?", [
     { label: "A Claude subscription (Pro or Max). Included, no per-call charge.", value: "plan" },
     { label: "None", value: "none" },
   ]);
-  const gpt = await ask(rl, "GPT access?", [
+  if (claude === "none") {
+    claude = await ask(rl, "No subscription. Use an Anthropic API key instead? This one IS billed per call.", [
+      { label: "Yes, use my API key and bill me per call", value: "metered" },
+      { label: "No, skip the Claude legs entirely", value: "none" },
+    ]);
+  }
+
+  let gpt = await ask(rl, "GPT access?", [
     { label: "A ChatGPT subscription usable by the Codex CLI. Included, no per-call charge.", value: "plan" },
     { label: "None", value: "none" },
   ]);
+  if (gpt === "none") {
+    gpt = await ask(rl, "No subscription. Use an OpenAI API key instead? This one IS billed per call.", [
+      { label: "Yes, use my API key and bill me per call", value: "metered" },
+      { label: "No, skip the GPT leg entirely", value: "none" },
+    ]);
+  }
   const gemini = await ask(rl, "Gemini API key? This leg is billed per call.", [
     { label: "Yes, and I want it on", value: "on" },
     { label: "Yes, but leave it off for now", value: "off" },
@@ -237,8 +288,9 @@ async function init() {
   await rl.close();
 
   const legs = [];
-  if (claude === "plan") legs.push("claude-reviewer", "judge");
-  if (gpt === "plan") legs.push("gpt-reviewer");
+  // Either credential runs the leg. The judge is Claude-family either way.
+  if (claude !== "none") legs.push("claude-reviewer", "judge");
+  if (gpt !== "none") legs.push("gpt-reviewer");
   if (gemini === "on") legs.push("gemini-reviewer");
 
   if (legs.length === 0) {
@@ -256,7 +308,7 @@ async function init() {
   // with the sources stripped and reconciles them — and nothing downstream says so. A
   // capability you silently do not have is worse than one you were told about, so say it
   // here, before anything is written, and say what turns it back on.
-  const judgeless = claude !== "plan";
+  const judgeless = claude === "none";
   if (judgeless) {
     console.log("\n! No Claude subscription, so the BLINDED JUDGE will not run.");
     console.log("  You will get each reviewer's findings, deduplicated, and nothing that");
@@ -301,9 +353,15 @@ async function init() {
   if (gemini === "off") {
     console.log("Gemini is configured but off. Set ALLOW_METERED to true when you want it.");
   }
-  if (billing === "no") {
-    console.log("Without admin keys, every cost is reported as \"unverified\". That is the honest");
-    console.log("answer and it is deliberate: an unmeasured run is never reported as free.");
+  if (billing === "no" && (claude === "plan" || gpt === "plan")) {
+    // Only a PLAN claim needs an invoice to back it. A pay-per-call leg reports what it
+    // actually spent from its own token counts, so there is nothing unverified about it.
+    console.log("Without admin keys, a subscription leg's cost is reported as \"unverified\" rather");
+    console.log("than as zero. That is deliberate: an unmeasured run is never reported as free.");
+  }
+  if (claude === "metered" || gpt === "metered") {
+    console.log("Your pay-per-call legs report what they actually spent, priced from their own");
+    console.log("token counts. That number is real; it is simply not checked against an invoice.");
   }
   console.log("\nThen open a pull request and run:  gh workflow run tribunal.yml -f pr_number=<n>\n");
   return 0;
