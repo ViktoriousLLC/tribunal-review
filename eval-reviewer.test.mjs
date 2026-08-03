@@ -706,7 +706,8 @@ test("runFable: FAIL-OPEN — no plan token → ok:false, and it says the CREDEN
     // that and nothing more; the old message read it as "the Max plan dropped Fable",
     // which is a different claim and one nothing here measured.
     assert.match(leg.error, /The Fable leg did not run/);
-    assert.match(leg.error, /no plan credential/);
+    assert.match(leg.error, /no credential/);
+    assert.match(leg.error, /ANTHROPIC_API_KEY/, "both routes back must be named");
     assert.match(leg.error, /3 models instead of 4/);
     assert.equal(/no longer covered by the Max plan/.test(leg.error), false);
   } finally {
@@ -983,12 +984,18 @@ test("sanitiseReason is one helper, and it is idempotent", () => {
   assert.equal(sanitiseReason(null), "");
 });
 
-test("Fable failure messages describe the permanent plan-only policy", () => {
+test("Fable failure messages name a real cause and every route back", () => {
   const planErr = new Error("this model is not available on your plan");
   assert.match(fableFailureMessage(planErr), /plan no longer covers Fable/);
   assert.match(fableFailureMessage(planErr), /plan-only by policy/);
-  assert.match(fableNoCredentialMessage(), /no plan credential/);
-  assert.match(fableNoCredentialMessage(), /plan-only by policy/);
+  // Fable is no longer plan-ONLY: it runs pay-per-call too, so the no-credential message
+  // must name both ways in rather than the version of the policy that used to hold. This
+  // panel printed the stale wording on its own review of the change that made it untrue.
+  assert.match(fableNoCredentialMessage(), /no credential/);
+  assert.match(fableNoCredentialMessage(), /CLAUDE_CODE_OAUTH_TOKEN/);
+  assert.match(fableNoCredentialMessage(), /ANTHROPIC_API_KEY/);
+  assert.match(fableNoCredentialMessage(), /ALLOW_METERED/);
+  assert.equal(/plan-only by policy/.test(fableNoCredentialMessage()), false);
 });
 
 test("a usage cap that suggests upgrading is not a plan-coverage change", () => {

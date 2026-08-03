@@ -123,11 +123,17 @@ const CLAUDE_MODEL = process.env.EVAL_CLAUDE_MODEL || "claude-opus-5";
 // billing fact it had not measured — that exact class the surrounding code was
 // written to prevent, one level up.
 //
-// Two rules now. Never infer a cause from an error: report the error. And never offer a
-// metered switch — standing policy is that nothing runs metered except Gemini, so a
-// suggestion to buy a leg back is an answer nobody will take.
+// Never infer a cause from an error: report the error. And name every route back, which
+// since the pay-per-call change is two of them — the previous wording said "Fable is
+// plan-only by policy", which this panel printed on its own review of the change that
+// made it untrue. A message describing the version before yours is worse than none.
 export function fableNoCredentialMessage() {
-  return "The Fable leg did not run: no plan credential (CLAUDE_CODE_OAUTH_TOKEN) was present. Fable is plan-only by policy, so the panel ran with 3 models instead of 4.";
+  return (
+    "The Fable leg did not run: no credential. Either set CLAUDE_CODE_OAUTH_TOKEN to run it " +
+    "on a subscription at no per-call cost, or set ANTHROPIC_API_KEY together with " +
+    "ALLOW_METERED=true to run it pay-per-call. The panel ran with 3 models instead of 4, " +
+    "and nothing was billed."
+  );
 }
 
 // Does this error genuinely SAY the plan stopped covering the model? Deliberately narrow.
