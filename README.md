@@ -53,6 +53,17 @@ Two things follow from that table and both are deliberate.
 
 **A metered key alone never starts billing you.** The Gemini leg needs the key *and* the explicit `ALLOW_METERED=true` opt-in. Two locks, because installing a tool should not be able to open an account with a payment method attached.
 
+## Running the tests
+
+201 tests, no dependencies, no build step:
+
+```
+npm test
+```
+
+They run on every pull request here too. A guard nothing exercises is the exact defect
+this package exists to catch, so it would be poor form to ship one.
+
 ## The one file that makes it yours
 
 `.tribunal/review-gates.md` is read at review time and prepended to every reviewer's instructions. Write down the mistakes your project actually makes. A gate that says "look for bugs" changes nothing. A gate that names your own recurring failure is worth ten generic ones. Without the file the panel still works and reviews generically.
