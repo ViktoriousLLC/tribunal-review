@@ -12,6 +12,7 @@ import { mkdirSync, existsSync, copyFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import { isDirectInvocation, reportMisidentifiedEntrypoint } from "../entrypoint.mjs";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CWD = process.cwd();
@@ -39,8 +40,138 @@ function present(env) {
   return Boolean(process.env[env] && process.env[env].trim());
 }
 
+/**
+ * The `gh secret set` / `gh variable set` lines for a given set of answers.
+ *
+ * Shared by `init` and `setup`, because printing this list once into a terminal that then
+ * scrolls away is not a way to deliver instructions. `setup` reprints it on demand, and
+ * `doctor --repo` narrows it to what is actually still missing.
+ */
+export function secretCommands({ claude, gpt, gemini, billing }) {
+  const wanted = [];
+  if (claude === "plan") wanted.push("CLAUDE_CODE_OAUTH_TOKEN");
+  if (gpt === "plan") wanted.push("CODEX_AUTH_JSON");
+  if (gemini !== "none") wanted.push("GEMINI_API_KEY");
+  // Per leg. Asking someone to create an OpenAI org admin key to verify a leg they never
+  // enabled is asking for a credential that does nothing.
+  if (billing === "yes" && claude === "plan") wanted.push("ANTHROPIC_ADMIN_KEY");
+  if (billing === "yes" && gpt === "plan") wanted.push("OPENAI_ADMIN_KEY");
+
+  const lines = wanted.map((env) =>
+    env === "CODEX_AUTH_JSON"
+      ? `  gh secret set CODEX_AUTH_JSON < "$HOME/.codex/auth.json"`
+      : `  gh secret set ${env}`
+  );
+  if (gemini === "on") lines.push("  gh variable set ALLOW_METERED --body true");
+  return { wanted, lines };
+}
+
+/** Run a gh command and return its stdout, or null when gh cannot answer. */
+async function gh(args) {
+  const { spawnSync } = await import("node:child_process");
+  const r = spawnSync("gh", args, { encoding: "utf8", shell: false });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout;
+}
+
+/**
+ * Does the REPOSITORY have these credentials — not this laptop.
+ *
+ * The gap this closes: `doctor` reads environment variables on the machine you run it
+ * from, so somebody who correctly pasted five secrets into GitHub and then ran `doctor`
+ * to check their work saw "0 of 5 configured" and reasonably concluded they had broken
+ * something. That is the likeliest way to lose a first-time user, and it is the one
+ * question the tool could not answer: did my setup work.
+ *
+ * GitHub never returns a secret's VALUE, to anyone, ever. It does return the NAMES, which
+ * is all this needs.
+ */
+async function doctorRepo(repoArg) {
+  const target = repoArg ? ["--repo", repoArg] : [];
+  const label = repoArg || "the current repository";
+  console.log(`\ntribunal doctor --repo — what ${label} actually has\n`);
+
+  const secretsRaw = await gh(["secret", "list", ...target, "--json", "name"]);
+  if (secretsRaw === null) {
+    console.log("  Could not ask GitHub. That is usually one of three things:");
+    console.log("    - the GitHub CLI is not installed        → https://cli.github.com");
+    console.log("    - you are not logged in                  → gh auth login");
+    console.log("    - you are not inside the repository      → pass it: tribunal doctor --repo owner/name");
+    console.log("");
+    return 2;
+  }
+  const variablesRaw = (await gh(["variable", "list", ...target, "--json", "name,value"])) || "[]";
+
+  let secretNames = [];
+  let variables = [];
+  try {
+    secretNames = JSON.parse(secretsRaw).map((s) => s.name);
+    variables = JSON.parse(variablesRaw);
+  } catch {
+    console.log("  GitHub answered in a shape this version does not understand, so nothing is reported.");
+    console.log("  Refusing to guess: an unreadable answer is not the same as an empty one.");
+    console.log("");
+    return 2;
+  }
+
+  const has = (n) => secretNames.includes(n);
+  const missing = [];
+  for (const c of CREDENTIALS) {
+    const ok = has(c.env);
+    if (!ok) missing.push(c);
+    console.log(`  ${ok ? "✓" : "·"} ${c.env.padEnd(24)} ${ok ? "set in this repository" : "not set"}`);
+    console.log(`    ${ok ? "enables" : "would enable"}: ${c.unlocks}`);
+  }
+
+  const allowMetered = variables.find((v) => v.name === "ALLOW_METERED");
+  const meteredOn = String(allowMetered?.value || "").trim().toLowerCase() === "true";
+  console.log("");
+
+  // What will actually happen on the next dispatch, which is the thing they wanted to know.
+  const legs = [];
+  if (has("CLAUDE_CODE_OAUTH_TOKEN")) legs.push("claude-reviewer", "judge");
+  if (has("CODEX_AUTH_JSON")) legs.push("gpt-reviewer");
+  if (has("GEMINI_API_KEY") && meteredOn) legs.push("gemini-reviewer");
+
+  if (legs.length === 0) {
+    console.log("  Legs that will run on the next dispatch: NONE.");
+    console.log("  The panel will still post a comment naming every leg and what it needs,");
+    console.log("  and exit 0. It will not review anything.");
+  } else {
+    console.log(`  Legs that will run on the next dispatch: ${legs.join(", ")}.`);
+  }
+  if (!has("CLAUDE_CODE_OAUTH_TOKEN") && legs.length > 0) {
+    console.log("  No judge: the blinded reconciliation pass is Claude-only, so you get each");
+    console.log("  reviewer's findings and nothing that reconciles them.");
+  }
+  if (has("GEMINI_API_KEY") && !meteredOn) {
+    console.log("");
+    console.log("  ! GEMINI_API_KEY is set but ALLOW_METERED is not \"true\", so that leg stays OFF.");
+    console.log("    Deliberate: a key alone never starts billing you.");
+    console.log("    Turn it on with:  gh variable set ALLOW_METERED --body true");
+  }
+
+  if (missing.length > 0) {
+    console.log("\n  Still missing. Run these from inside the repository:\n");
+    for (const c of missing) {
+      const cmd =
+        c.env === "CODEX_AUTH_JSON"
+          ? `gh secret set CODEX_AUTH_JSON < "$HOME/.codex/auth.json"`
+          : `gh secret set ${c.env}`;
+      console.log(`  ${cmd}`);
+      console.log(`      how to get the value: ${c.how}`);
+    }
+  } else {
+    console.log("\n  Every credential this tool understands is set. Nothing left to do.");
+  }
+  console.log("");
+  return 0;
+}
+
 function doctor() {
-  console.log("\ntribunal doctor — credential presence in this environment\n");
+  console.log("\ntribunal doctor — credential presence ON THIS MACHINE\n");
+  console.log("  This reads environment variables here, which is NOT where the panel runs.");
+  console.log("  To check whether your repository is set up, run:  tribunal doctor --repo\n");
   let configured = 0;
   for (const c of CREDENTIALS) {
     const ok = present(c.env);
@@ -112,7 +243,11 @@ async function init() {
 
   if (legs.length === 0) {
     console.log("\nNo legs available, so there is nothing to install yet.");
-    console.log("Come back when you have at least a Claude subscription. Nothing was written.\n");
+    // EITHER subscription is enough on its own — the old wording here said "a Claude
+    // subscription", which would have turned away someone the tool works fine for.
+    console.log("You need at least one of: a Claude subscription (Pro or Max), a ChatGPT");
+    console.log("subscription the Codex CLI can use, or a Gemini API key you are willing to");
+    console.log("be billed for. Any ONE of those runs a review. Nothing was written.\n");
     return 0;
   }
 
@@ -152,26 +287,12 @@ async function init() {
     console.log(`✓ wrote ${path.relative(CWD, gatesPath)} — edit this. It is what makes the review yours.`);
   }
 
-  const wanted = [];
-  if (claude === "plan") wanted.push("CLAUDE_CODE_OAUTH_TOKEN");
-  if (gpt === "plan") wanted.push("CODEX_AUTH_JSON");
-  if (gemini !== "none") wanted.push("GEMINI_API_KEY");
-  // Per leg, like the three lines above. Asking someone to create an OpenAI org admin
-  // key to verify a leg they never enabled is asking for a credential that does nothing.
-  if (billing === "yes" && claude === "plan") wanted.push("ANTHROPIC_ADMIN_KEY");
-  if (billing === "yes" && gpt === "plan") wanted.push("OPENAI_ADMIN_KEY");
-
-  console.log("\nNow add the secrets. Run these, one at a time, and paste the value when asked:\n");
-  for (const env of wanted) {
-    if (env === "CODEX_AUTH_JSON") {
-      console.log(`  gh secret set CODEX_AUTH_JSON < "$HOME/.codex/auth.json"`);
-    } else {
-      console.log(`  gh secret set ${env}`);
-    }
-  }
-  if (gemini === "on") {
-    console.log(`  gh variable set ALLOW_METERED --body true`);
-  }
+  const { lines } = secretCommands({ claude, gpt, gemini, billing });
+  console.log("\nNow add the secrets. Run these from inside the repository, one at a time,");
+  console.log("and paste the value when asked:\n");
+  for (const line of lines) console.log(line);
+  console.log("\nLost this list? `tribunal setup` prints it again.");
+  console.log("Want to know whether it worked? `tribunal doctor --repo` asks GitHub.");
 
   console.log(`\nLegs that will run: ${legs.join(", ")}.`);
   if (judgeless) {
@@ -188,12 +309,64 @@ async function init() {
   return 0;
 }
 
-const cmd = process.argv[2];
-if (cmd === "doctor") process.exit(doctor());
-else if (cmd === "init") process.exit(await init());
-else {
-  console.log("usage: tribunal <init|doctor>");
-  console.log("  init    ask four questions, write the workflow, print the secret commands");
-  console.log("  doctor  show which credentials are present and what the missing ones unlock");
-  process.exit(cmd ? 1 : 0);
+/**
+ * Reprint the setup commands without re-running init.
+ *
+ * init prints them once, into a terminal that then scrolls away. That is not a way to
+ * deliver instructions somebody has to act on across two websites and a password manager.
+ * Non-interactive on purpose, so it works over ssh, in a script, and in CI.
+ */
+function setup(argv) {
+  const flag = (name) => argv.includes(name);
+  // Default to the full set. Anyone who skipped a leg simply ignores its line, which is
+  // cheaper than making them answer four questions again to reread one command.
+  const answers = {
+    claude: flag("--no-claude") ? "none" : "plan",
+    gpt: flag("--no-gpt") ? "none" : "plan",
+    gemini: flag("--gemini") ? "on" : "none",
+    billing: flag("--no-billing") ? "no" : "yes",
+  };
+  const { lines } = secretCommands(answers);
+  console.log("\nSetup commands. Run these from inside the repository:\n");
+  for (const line of lines) console.log(line);
+  console.log("\nEach one prompts for the value; nothing is echoed and nothing is stored locally.");
+  console.log("Where to get each value:  tribunal doctor");
+  console.log("Did it work:              tribunal doctor --repo\n");
+  console.log("Showing every credential. Skip any leg you are not using, or narrow the list:");
+  console.log("  --no-claude   --no-gpt   --gemini   --no-billing\n");
+  return 0;
+}
+
+async function runCli() {
+  const cmd = process.argv[2];
+  const args = process.argv.slice(3);
+  if (cmd === "doctor") {
+    // `--repo` alone means the current directory's repository; `--repo owner/name` names one.
+    const i = args.indexOf("--repo");
+    if (i === -1) process.exit(doctor());
+    const named = args[i + 1] && !args[i + 1].startsWith("--") ? args[i + 1] : null;
+    process.exit(await doctorRepo(named));
+  } else if (cmd === "init") process.exit(await init());
+  else if (cmd === "setup") process.exit(setup(args));
+  else {
+    console.log("usage: tribunal <init|setup|doctor>");
+    console.log("  init            ask four questions, write the workflow, print the secret commands");
+    console.log("  setup           print those secret commands again, without re-running init");
+    console.log("  doctor          which credentials are present ON THIS MACHINE, and what each unlocks");
+    console.log("  doctor --repo   which are present IN THE REPOSITORY, and which legs will actually run");
+    console.log("                  (add owner/name to check a repository you are not standing in)");
+    process.exit(cmd ? 1 : 0);
+  }
+}
+
+// Same entry-point guard as the other executables, and it earned its place immediately:
+// without it, `import { secretCommands } from "./bin/tribunal.mjs"` RAN the dispatcher,
+// which printed usage and called process.exit(0), killing the test process before a single
+// assertion. The suite then reported one passing test and went green. A file that cannot
+// be imported cannot be tested, and a test run that exits early looks exactly like one
+// that succeeded.
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
+  await runCli();
+} else if (reportMisidentifiedEntrypoint(process.argv[1], import.meta.url, "tribunal.mjs")) {
+  process.exit(1);
 }

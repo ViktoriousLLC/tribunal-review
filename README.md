@@ -2,7 +2,9 @@
 
 **It reviews your pull requests on the AI subscriptions you already pay for, and it proves what each run cost by reading the provider's invoice.**
 
-Not another API key with a meter running. If you have a Claude subscription and a ChatGPT subscription, you already have everything two of the three review legs need, and they add nothing to your bill. The only optionally-metered leg is Gemini, and it stays off until you set `ALLOW_METERED=true` on purpose.
+Not another API key with a meter running. If you have a Claude subscription and a ChatGPT subscription, you already have everything two of the three review legs need, and they add nothing to your bill. The only optionally-metered leg is Gemini, and it stays off until you set `ALLOW_METERED=true` on purpose. **Any one** of the three is enough to get a review; you do not need all of them.
+
+**There is deliberately no option to point the Claude or GPT legs at a pay-per-call API key.** That is not an oversight and it is not ideology. `ANTHROPIC_API_KEY` outranks the subscription token in the Claude CLI's own auth order, so merely having the key in the environment silently moves every leg onto metered billing. That is not a hypothetical: it is how this panel billed about $62 in nine days while printing `$0.0000 (plan)` on every pull request. The fix that actually holds is that the code hands those legs an environment which *cannot* contain an API key. A leg that loses its subscription credential fails loudly and says so, rather than reaching for a card.
 
 The second half matters more than it sounds. Most tools that claim to be free are inferring it from a config flag. This one asks the provider's own usage API what it was actually billed, before and after the run, and reports the difference. When it cannot get an answer it prints **unverified** rather than a number it made up.
 
@@ -30,6 +32,20 @@ npx tribunal-review doctor
 ```
 
 Prints which credentials are present in the current environment, and for each missing one, what it would unlock. Safe to run in CI. It reads presence, never values, and prints no secret.
+
+**That checks your machine, not your repository.** The panel runs on GitHub, so after you have pasted the secrets in, this is the one that answers "did my setup work":
+
+```
+npx tribunal-review doctor --repo
+```
+
+It asks GitHub which secret NAMES exist (GitHub never returns a value, to anyone), tells you **which legs will actually run on your next dispatch**, and prints the exact command for anything still missing. Add `owner/name` to check a repository you are not standing in.
+
+Lost the setup commands when your terminal scrolled? They are not gone:
+
+```
+npx tribunal-review setup
+```
 
 Then, on the final commit of a pull request:
 
