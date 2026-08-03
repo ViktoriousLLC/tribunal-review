@@ -1,0 +1,38 @@
+# The package's own tests, on every pull request.
+#
+# 201 of them exist and nothing was running them, which is the same shape as the
+# defect this whole package is about: a control that exists, is believed in, and
+# is never actually exercised.
+#
+# No dependencies to install — the package has none, and the tests run on the
+# node:test runner built into Node itself. So this is checkout, setup, run.
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A PR that gets several pushes in a row should not pay for every one of them.
+concurrency:
+  group: tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: reading the code is all this needs.
+permissions: {}
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Matches `engines.node` in package.json. Pinning the floor rather than
+          # the latest is deliberate: it catches a syntax or API that only exists
+          # in a newer runtime, which is exactly what would break a consumer on
+          # the version we advertise as supported.
+          node-version: "20"
+      - run: npm test
