@@ -4,6 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import {
   parseLenientJson,
   normalizeFindings,
@@ -60,6 +61,7 @@ import {
   summarizeEvalRunRows,
   fetchEvalPrRunningTotal,
   INCOMPLETE_EVAL_TOTAL,
+  isDirectInvocation,
 } from "./eval-reviewer.mjs";
 
 // ---------- parseLenientJson ----------
@@ -2223,4 +2225,40 @@ test("ledger states: every state renderComment accepts survives without a numeri
       `renderComment must not throw on state "${state}"`
     );
   }
+});
+
+// The first real end-to-end dispatch of this package exited 0 in 64 milliseconds having
+// printed nothing and posted no comment, because npm SYMLINKS a package installed from a
+// path or a git ref and the entry-point check compared raw paths. A reviewer that reviews
+// nothing while the job goes green is the exact defect this project exists to prevent, so
+// the check is pinned here.
+test("the entry-point check survives a symlinked install", () => {
+  const link = "/tmp/x/node_modules/tribunal-review/eval-reviewer.mjs";
+  const real = "/home/runner/work/repo/eval-reviewer.mjs";
+  const resolve = (p) => (p === link ? real : p);
+
+  assert.equal(
+    isDirectInvocation(link, pathToFileURL(real).href, resolve),
+    true,
+    "installed via symlink: argv[1] is the link, import.meta.url is the target, and this must still be a direct invocation"
+  );
+  assert.equal(
+    isDirectInvocation(real, pathToFileURL(real).href, resolve),
+    true,
+    "a plain copied install still works"
+  );
+  assert.equal(
+    isDirectInvocation("/somewhere/else/other.mjs", pathToFileURL(real).href, resolve),
+    false,
+    "a different script importing this module is NOT a direct invocation"
+  );
+  assert.equal(isDirectInvocation(undefined, pathToFileURL(real).href, resolve), false);
+});
+
+test("an unresolvable path falls back rather than silently deciding not to run", () => {
+  const real = "/home/runner/work/repo/eval-reviewer.mjs";
+  const throwing = () => {
+    throw new Error("ENOENT");
+  };
+  assert.equal(isDirectInvocation(real, pathToFileURL(real).href, throwing), true);
 });

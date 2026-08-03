@@ -58,9 +58,9 @@
 //
 // Exit codes: 0 always, UNLESS EVAL_BLOCKING=true and a qualifying blocker fires (1).
 
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { meteredOutputTokens, openaiMeteredOutputTokens, billingVerdict, billingLogLine, SETTLE_MS } from "./billing-verify.mjs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 // A builtin, so a static import costs nothing (the lazy imports elsewhere exist to keep
 // the vendor SDKs out of a test-only import of this module).
 import { spawn as spawnProcess } from "node:child_process";
@@ -2747,11 +2747,42 @@ async function main() {
   process.exit(0);
 }
 
-// Only run when invoked directly (so tests can import the pure helpers).
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+/**
+ * Only run when invoked directly, so the tests can import the pure helpers.
+ *
+ * REAL paths on both sides, and that is not pedantry — it is the difference between this
+ * file reviewing your pull request and this file doing nothing while the job goes green.
+ * npm SYMLINKS the package when it is installed from a local path, a git ref, or `npm
+ * link`, so `process.argv[1]` is the link and `import.meta.url` is the target. Comparing
+ * them raw made them differ, `main()` never ran, and the step exited 0 in 64 milliseconds
+ * having printed nothing and posted no comment. The first real end-to-end dispatch of
+ * this package did exactly that: a silent success, which is the single failure this whole
+ * project exists to make impossible.
+ */
+export function isDirectInvocation(argv1, moduleUrl, resolve = realpathSync) {
+  if (!argv1) return false;
+  try {
+    return pathToFileURL(resolve(argv1)).href === pathToFileURL(resolve(fileURLToPath(moduleUrl))).href;
+  } catch {
+    // A path we cannot resolve is not evidence either way, so fall back to the raw
+    // comparison rather than silently deciding not to run.
+    return moduleUrl === pathToFileURL(argv1).href;
+  }
+}
+
+const isMain = isDirectInvocation(process.argv[1], import.meta.url);
 if (isMain) {
   main().catch((e) => {
     console.error("eval-reviewer crashed (fail-open, exit 0):", e);
     process.exit(0);
   });
+} else if (process.argv[1] && /eval-reviewer\.mjs$/.test(process.argv[1])) {
+  // Someone ran this file as a script and the check above still said no. That can only be
+  // a resolution problem, and the one thing it must not do is exit quietly: a reviewer
+  // that reviews nothing while reporting success is worse than one that crashes.
+  console.error(
+    "::error title=Tribunal did not run::eval-reviewer.mjs was executed directly but did not recognise itself as the entry point, so no review ran. " +
+      `argv[1]=${process.argv[1]} import.meta.url=${import.meta.url}`
+  );
+  process.exit(1);
 }
