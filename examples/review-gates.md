@@ -42,3 +42,5 @@ is clean, say so and stop.
   done the work.
 - **Three copies of a check are three chances to get it wrong.** Prefer one shared helper
   over a pattern repeated across files.
+- **A credential decision must forward exactly one credential.** Two in one environment
+  means whichever the tool prefers wins silently.
