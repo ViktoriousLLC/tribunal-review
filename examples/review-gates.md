@@ -40,3 +40,5 @@ is clean, say so and stop.
 - **Silent success is the worst outcome.** A check that cannot tell whether it ran must
   fail loudly, never exit zero. Flag any code path that can report a pass without having
   done the work.
+- **Three copies of a check are three chances to get it wrong.** Prefer one shared helper
+  over a pattern repeated across files.
