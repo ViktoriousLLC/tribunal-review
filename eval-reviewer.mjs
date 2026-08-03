@@ -59,6 +59,7 @@
 // Exit codes: 0 always, UNLESS EVAL_BLOCKING=true and a qualifying blocker fires (1).
 
 import { pathToFileURL, fileURLToPath } from "node:url";
+import { isDirectInvocation, reportMisidentifiedEntrypoint } from "./entrypoint.mjs";
 import { meteredOutputTokens, openaiMeteredOutputTokens, billingVerdict, billingLogLine, SETTLE_MS } from "./billing-verify.mjs";
 import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 // A builtin, so a static import costs nothing (the lazy imports elsewhere exist to keep
@@ -2759,30 +2760,11 @@ async function main() {
  * this package did exactly that: a silent success, which is the single failure this whole
  * project exists to make impossible.
  */
-export function isDirectInvocation(argv1, moduleUrl, resolve = realpathSync) {
-  if (!argv1) return false;
-  try {
-    return pathToFileURL(resolve(argv1)).href === pathToFileURL(resolve(fileURLToPath(moduleUrl))).href;
-  } catch {
-    // A path we cannot resolve is not evidence either way, so fall back to the raw
-    // comparison rather than silently deciding not to run.
-    return moduleUrl === pathToFileURL(argv1).href;
-  }
-}
-
-const isMain = isDirectInvocation(process.argv[1], import.meta.url);
-if (isMain) {
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
   main().catch((e) => {
     console.error("eval-reviewer crashed (fail-open, exit 0):", e);
     process.exit(0);
   });
-} else if (process.argv[1] && /eval-reviewer\.mjs$/.test(process.argv[1])) {
-  // Someone ran this file as a script and the check above still said no. That can only be
-  // a resolution problem, and the one thing it must not do is exit quietly: a reviewer
-  // that reviews nothing while reporting success is worse than one that crashes.
-  console.error(
-    "::error title=Tribunal did not run::eval-reviewer.mjs was executed directly but did not recognise itself as the entry point, so no review ran. " +
-      `argv[1]=${process.argv[1]} import.meta.url=${import.meta.url}`
-  );
+} else if (reportMisidentifiedEntrypoint(process.argv[1], import.meta.url, "eval-reviewer.mjs")) {
   process.exit(1);
 }

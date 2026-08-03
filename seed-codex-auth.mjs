@@ -13,6 +13,7 @@
 // Exits non-zero with a ::error:: annotation on an api-key-shaped credential, so the
 // failure is loud at seed time instead of silent on the invoice.
 import { writeFileSync, mkdirSync } from "node:fs";
+import { isDirectInvocation, reportMisidentifiedEntrypoint } from "./entrypoint.mjs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -66,4 +67,11 @@ function main() {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main();
+// Real-path comparison, shared with the other two entry points. Under a symlinked install
+// the raw comparison said "imported", this file did nothing, the step went green, and the
+// GPT leg then failed on a CODEX_HOME that had never been created.
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
+  main();
+} else if (reportMisidentifiedEntrypoint(process.argv[1], import.meta.url, "seed-codex-auth.mjs")) {
+  process.exit(1);
+}

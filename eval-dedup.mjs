@@ -1,4 +1,5 @@
 import { appendFileSync } from "node:fs";
+import { isDirectInvocation, reportMisidentifiedEntrypoint } from "./entrypoint.mjs";
 import { pathToFileURL } from "node:url";
 import { extractEvalData, isOurEvalComment } from "./eval-reviewer.mjs";
 
@@ -84,9 +85,13 @@ async function main() {
   }
 }
 
-const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) {
+// Real-path comparison, shared with the other two entry points — see entrypoint.mjs.
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
   main().catch((error) => {
     console.warn(`Eval dedup warning, running review: ${String(error?.message || error)}`);
   });
+} else if (reportMisidentifiedEntrypoint(process.argv[1], import.meta.url, "eval-dedup.mjs")) {
+  // This one decides whether a review is SKIPPED, so a silent no-op here is the safe
+  // direction (the review runs). It still must not be silent.
+  process.exit(1);
 }

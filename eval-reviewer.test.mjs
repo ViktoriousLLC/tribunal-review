@@ -61,8 +61,8 @@ import {
   summarizeEvalRunRows,
   fetchEvalPrRunningTotal,
   INCOMPLETE_EVAL_TOTAL,
-  isDirectInvocation,
 } from "./eval-reviewer.mjs";
+import { isDirectInvocation } from "./entrypoint.mjs";
 
 // ---------- parseLenientJson ----------
 test("parseLenientJson: bare object", () => {
