@@ -1,0 +1,178 @@
+# Tribunal — a cross-model pull request review panel.
+#
+# A fresh-context panel reviews the PR diff, a blinded judge ranks what they
+# found, and the run's cost is checked against the provider invoice rather than
+# assumed. It posts ONE comment and upserts it on re-runs.
+#
+# ADVISORY, FULL STOP: it posts a comment, it never blocks a merge, and with this
+# dispatch-only trigger it CANNOT be made blocking. A workflow_dispatch run's check
+# attaches to the dispatched ref, not to the pull request head, so it never appears
+# on the PR and cannot be selected as a required status check. Making it blocking
+# would mean adding a `pull_request` trigger, which means reviewing every push and
+# paying for snapshots you are about to change. That trade is deliberately not made
+# here.
+#
+# WHEN IT RUNS: explicit dispatch only. Reviewing on every push means reviewing
+# snapshots you are about to change, and billing for each one. Dispatch it on the
+# final commit, right before you merge, so the panel reviews exactly what ships:
+#
+#   gh workflow run tribunal.yml -f pr_number=<N>
+#
+# SECRET SAFETY: workflow_dispatch cannot be triggered by a fork, so fork PRs can
+# never read these secrets.
+name: Tribunal review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+      force:
+        description: "Re-review even if this head SHA already has a completed review"
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+jobs:
+  review:
+    # REVIEW AT MERGE. The panel runs only on an explicit dispatch, fired on the
+    # final commit right before you merge, so it reviews exactly the code that
+    # ships. Auto-running on every push reviews snapshots you are about to change
+    # and bills for each throwaway state.
+    #   gh workflow run tribunal.yml -f pr_number=<N>
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: eval-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # If set, the Claude-family legs run on the Max/Pro subscription via the CLI.
+      # If empty, they fail loudly; there is no metered fallback.
+      # Generate the token with `claude setup-token`, then add it as this secret.
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      # The GPT leg's Codex PLAN credential. Job-level (not step-level) because a
+      # step's own `if:` cannot see env defined on that same step.
+      CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+      # The ONLY metered leg needs BOTH: the key, and an explicit opt-in. Holding a
+      # key is not consent to spend it, so the leg stays off until ALLOW_METERED is
+      # literally "true". Job-level for the same `if:` reason as above.
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      ALLOW_METERED: ${{ vars.ALLOW_METERED }}
+    steps:
+      - uses: actions/checkout@v4
+      # Deliberately ungated so the dedup step below runs on the pinned node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # Pinned on purpose. A tool that reviews your merges must not change under you
+      # because someone published a new version this morning. Installed into a scratch
+      # prefix, never into the repo, so a consumer's lockfile, private registry, or
+      # postinstall scripts are not dragged into the review job.
+      - name: Install the Tribunal panel
+        run: npm install --no-save --prefix "$RUNNER_TEMP/tribunal" tribunal-review@0.1.0
+      # Concurrency only cancels in-flight runs, so a completed re-dispatch of the same
+      # head SHA would pay for a full second review. This stops before the EXPENSIVE
+      # installs (the provider CLIs and the metered SDK) and before any model call.
+      # continue-on-error closes the one fail-open gap the script cannot cover itself: a
+      # crash BEFORE main() is reachable (a module-load error, an OOM, a bad node
+      # invocation) exits non-zero, and without this the whole review job would be
+      # skipped by the conditions below. An absent output already means run-the-review,
+      # so letting the step fail soft is the safe reading (a review round).
+      - name: Skip if this head SHA already has a completed review
+        id: dedup
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          EVAL_FORCE: ${{ github.event.inputs.force }}
+        run: node "$RUNNER_TEMP/tribunal/node_modules/tribunal-review/eval-dedup.mjs"
+      # Only when the metered leg is actually switched on, and pinned exactly, for the
+      # same reason as the panel itself: nothing that gates your merges should change
+      # because someone published this morning.
+      - name: Install the Gemini SDK (only when the metered leg is enabled)
+        if: steps.dedup.outputs.skip != 'true' && env.GEMINI_API_KEY != '' && env.ALLOW_METERED == 'true'
+        run: npm install --no-save --prefix "$RUNNER_TEMP/tribunal" @google/genai@2.7.0
+      - name: Install Claude CLI (only when running Claude on the subscription)
+        if: steps.dedup.outputs.skip != 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        run: npm install -g @anthropic-ai/claude-code@2.1.220   # pinned for the same reason as everything else here
+      # The GPT leg runs on the CODEX PLAN, not the metered OpenAI API.
+      - name: Install Codex CLI (the GPT leg, plan-authed)
+        if: steps.dedup.outputs.skip != 'true' && env.CODEX_AUTH_JSON != ''
+        run: npm install -g @openai/codex@0.144.5   # pinned: parseCodexJsonl is coupled to this CLI's --json event shape
+      # Seed the plan credential into a runner-local CODEX_HOME. The secret is read from
+      # the environment by the seeder (never an inline expression, never argv), so its
+      # value cannot land in the command line or the run log, and the file is created
+      # mode 0600.
+      #
+      # KNOWN LIMIT, stated rather than hidden: Codex rotates these tokens roughly every
+      # 8 days and writes the new ones back to auth.json. This runner is ephemeral, so
+      # that write is discarded and the stored secret eventually goes stale. When it
+      # does, the GPT leg FAILS LOUDLY in the PR comment with the exact refresh command
+      # — it never falls back to a credit card. Refresh with:
+      #   gh secret set CODEX_AUTH_JSON --repo <owner>/<repo> < "$HOME/.codex/auth.json"
+      - name: Seed the Codex plan credential
+        if: steps.dedup.outputs.skip != 'true' && env.CODEX_AUTH_JSON != ''
+        # FAIL SOFT. The seeder exits non-zero on a stale, truncated, or api-key-authed
+        # blob. Without this the job dies here: no comment, a red X, and the refresh command
+        # the reviewer would have printed never reaches the reader. Failing soft leaves
+        # CODEX_HOME unexported, so the GPT leg drops LOUDLY IN THE COMMENT instead, which
+        # is what every doc here promises.
+        continue-on-error: true
+        run: |
+          # The seeder VALIDATES before it writes: it rejects an api-key-authed blob and
+          # strips any OPENAI_API_KEY field, because Codex reads its credential from this
+          # file, not from the env — so the env allowlist alone would not stop a metered
+          # key from riding in inside auth.json. Reads the secret from the env (never argv
+          # or a log line) and writes mode 0600.
+          node "$RUNNER_TEMP/tribunal/node_modules/tribunal-review/seed-codex-auth.mjs" "$HOME/.codex-ci/auth.json"
+          # $HOME is only knowable at runtime, so CODEX_HOME is exported here rather than
+          # hardcoded as a job-level expression (the `env` context has no HOME).
+          echo "CODEX_HOME=$HOME/.codex-ci" >> "$GITHUB_ENV"
+      - name: Run cross-model review
+        if: steps.dedup.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          # ANTHROPIC_API_KEY IS DELIBERATELY NOT HERE.
+          #
+          # It used to be, and it cost ~$62 in nine days: the CLI's auth chain
+          # ranks ANTHROPIC_API_KEY ABOVE the plan token, so merely HAVING the key in the
+          # environment moved the Opus + Fable + coordinator legs onto metered billing —
+          # while the reviewer printed "$0.0000 (plan)".
+          #
+          # The durable fix is not a smarter check. It is that YOU CANNOT BILL A KEY YOU
+          # DO NOT HOLD. The Claude legs are plan-only. With no plan token they FAIL
+          # LOUDLY and say so in the comment; they never quietly reach for a credit card.
+          #
+          # Opus, Fable, and the blinded coordinator are plan-only forever. The code
+          # hands their CLI an env that cannot contain an API key. If the plan credential
+          # is lost, the affected leg fails loudly instead of quietly reaching for a card.
+          # Read-only org billing key. Used ONLY to VERIFY, against the real invoice, that
+          # the Claude legs did not bill — never to make a model call. Without it the
+          # reviewer reports "unverified", never "plan".
+          ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
+          # The GPT leg, on the Codex plan. Same shape as the Claude rule above,
+          # for the same reason: OPENAI_API_KEY is NOT here by default, so the leg is
+          # structurally incapable of billing. It authenticates against the auth.json
+          # seeded into CODEX_HOME two steps up. If that credential is stale the leg is
+          # SKIPPED and says so in the PR comment — it never reaches for a credit card.
+          # (CODEX_HOME is exported to $GITHUB_ENV by the seeding step above.) There is
+          # no OpenAI API fallback: a stale credential drops the leg loudly.
+          # Read-only org billing key — used ONLY to VERIFY, against OpenAI's real invoice,
+          # that the GPT leg did not bill. Never to make a model call. Without it the
+          # reviewer reports "unverified", never "plan".
+          OPENAI_ADMIN_KEY: ${{ secrets.OPENAI_ADMIN_KEY }}
+          # GEMINI_API_KEY and ALLOW_METERED are set at job level above and inherited.
+          # Optional: POST one immutable cost row per Actions run to your own endpoint
+          # before the mutable PR comment can be edited by a later dispatch. Unset by
+          # default; when unset the run logs that this record was not written.
+          # EVAL_RUN_URL: https://your-service.example.com/eval-run
+          # EVAL_RUN_SECRET: ${{ secrets.EVAL_RUN_SECRET }}
+        run: node "$RUNNER_TEMP/tribunal/node_modules/tribunal-review/eval-reviewer.mjs"

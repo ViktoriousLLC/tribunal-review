@@ -1,0 +1,53 @@
+{
+  "name": "tribunal-review",
+  "version": "0.1.0",
+  "description": "Reviews pull requests on the AI subscriptions you already pay for, and proves what each run cost by reading the provider invoice.",
+  "type": "module",
+  "bin": {
+    "tribunal": "./bin/tribunal.mjs"
+  },
+  "files": [
+    "bin/",
+    "templates/",
+    "examples/",
+    "eval-reviewer.mjs",
+    "eval-dedup.mjs",
+    "model-fallback.mjs",
+    "billing-verify.mjs",
+    "seed-codex-auth.mjs",
+    "eval-reviewer.test.mjs",
+    "eval-dedup.test.mjs",
+    "model-fallback.test.mjs",
+    "billing-verify.test.mjs",
+    "seed-codex-auth.test.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test eval-reviewer.test.mjs eval-dedup.test.mjs model-fallback.test.mjs billing-verify.test.mjs seed-codex-auth.test.mjs"
+  },
+  "keywords": [
+    "code-review",
+    "pull-request",
+    "github-actions",
+    "llm",
+    "claude",
+    "codex",
+    "gemini"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {},
+  "author": "Vik Agarwal (Viktorious LLC)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ViktoriousLLC/tribunal-review.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ViktoriousLLC/tribunal-review/issues"
+  },
+  "homepage": "https://github.com/ViktoriousLLC/tribunal-review#readme"
+}
