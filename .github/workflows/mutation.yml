@@ -1,0 +1,60 @@
+# Mutation testing on the money paths. Weekly, never on a pull request.
+#
+# WHY IT EXISTS. This package shipped 220 passing tests alongside a route that could never
+# have worked. "The suite is green" was not evidence, because coverage measures which lines
+# RAN, not whether a wrong answer would be noticed. Stryker changes the code on purpose and
+# checks whether any test fails. A surviving mutant is a decorative test.
+#
+# WHY IT IS NOT ON THE PR PATH. GitHub bills per JOB with a whole-minute floor, so job count
+# is the cost driver rather than duration. Adding a job to every pull request to fix a
+# testing problem would make the bill worse. The per-PR gate (tests.yml) stays one cheap
+# job; this expensive proof runs on a cadence, and can be dispatched by hand when the
+# credential or billing code changes.
+#
+# Scope is in stryker.config.json and is deliberately small: the code that decides what was
+# BILLED, and the code that decides WHICH CREDENTIAL a leg gets. Everything that has ever
+# cost real money here was one of those two.
+name: Mutation testing
+
+on:
+  schedule:
+    # Sunday 06:00 UTC. A cron is a REQUEST, not a fire time — Actions drifts by up to an
+    # hour under load — so nothing here depends on the exact minute.
+    - cron: "0 6 * * 0"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: mutation
+  cancel-in-progress: true
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    # The baseline run takes about 80 seconds. This ceiling is for a hang, not for growth.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      # Installed here rather than added to package.json, so the package keeps its actual
+      # zero-dependency property and a consumer never pulls a mutation testing framework.
+      # Pinned for the same reason everything else here is pinned.
+      - run: npm install --no-save @stryker-mutator/core@9.6.1
+      # Exits 1 when the score falls under `thresholds.break`, which is set AT the recorded
+      # baseline. So this job goes red on a REGRESSION in test quality, which is a thing no
+      # other check in this repository can see.
+      - run: npx stryker run
+      # The survivor list is the actual product of this run: each one names a line where the
+      # code could be wrong and no test would say so.
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mutation-report
+          path: reports/mutation/mutation.json
+          if-no-files-found: warn
+          retention-days: 30

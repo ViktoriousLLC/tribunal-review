@@ -1,0 +1,46 @@
+{
+  "_comment": [
+    "Mutation testing on the MONEY PATHS only, because a test that passes is not evidence.",
+    "This package shipped 220 green tests alongside a route that could never have worked, so",
+    "the question 'do these tests notice when the code is wrong' is the one worth paying for.",
+    "Stryker changes the code deliberately and checks whether any test fails. A surviving",
+    "mutant is a decorative test.",
+    "",
+    "SCOPE IS DELIBERATE AND SMALL. Two things only: the code that decides what was BILLED",
+    "(billing-verify.mjs), and the code that decides WHICH CREDENTIAL a leg gets. Everything",
+    "that has ever cost real money here was one of those two. Mutating the other 2,700 lines",
+    "would cost hours and tell us about a comment renderer.",
+    "",
+    "NEVER ON THE PULL REQUEST PATH. GitHub bills per job with a whole-minute floor, so the",
+    "cheap gate stays cheap and this runs weekly (.github/workflows/mutation.yml).",
+    "",
+    "BASELINE: 401 mutants, 285 killed, 116 survived, score 71.07 (billing-verify.mjs 67.82,",
+    "the eval-reviewer credential ranges 79.46). 76 seconds on one machine. `break` is set AT",
+    "that baseline rather than at an aspiration, so the run fails on a REGRESSION and does not",
+    "cry wolf about a number we already know. Raise it when the survivors are killed; the",
+    "survivors themselves are the to-do list, and reports/mutation/mutation.json names them.",
+    "",
+    "Run it locally with: npx @stryker-mutator/core@9.6.1 run"
+  ],
+  "packageManager": "npm",
+  "reporters": ["clear-text", "json"],
+  "testRunner": "command",
+  "commandRunner": {
+    "command": "node --test billing-verify.test.mjs eval-reviewer.test.mjs"
+  },
+  "coverageAnalysis": "off",
+  "mutate": [
+    "billing-verify.mjs",
+    "eval-reviewer.mjs:376-400",
+    "eval-reviewer.mjs:1887-1968",
+    "eval-reviewer.mjs:2165-2215"
+  ],
+  "timeoutMS": 120000,
+  "thresholds": {
+    "high": 90,
+    "low": 75,
+    "break": 71
+  },
+  "tempDirName": ".stryker-tmp",
+  "cleanTempDir": true
+}

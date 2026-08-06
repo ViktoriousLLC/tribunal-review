@@ -4,7 +4,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import path from "node:path";
+
+// Thirteen tests below assert on the SOURCE TEXT of eval-reviewer.mjs rather than on a
+// return value, deliberately: they pin properties a value cannot express — that a flag is
+// absent from an argv, that a duration is logged before a throw, that a metered code path
+// does not exist at all.
+//
+// Mutation testing rewrites that text. Stryker copies the project into
+// .stryker-tmp/sandbox-XXXX and instruments the mutated file, so every one of those
+// assertions fails on the instrumented copy and the whole run dies in its dry run. Point
+// them at the untouched original instead: inside a sandbox the project root is two
+// directories up, and everywhere else it is simply this directory.
+//
+// They contribute nothing to the mutation score, which is correct — a test that reads
+// source text cannot notice a changed operator — and they keep doing their real job.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE_DIR = /\.stryker-tmp[\\/]sandbox-/.test(HERE) ? path.resolve(HERE, "..", "..") : HERE;
+const readSource = (name = "eval-reviewer.mjs") => readFileSync(path.join(SOURCE_DIR, name), "utf8");
 import {
   parseLenientJson,
   normalizeFindings,
@@ -1138,21 +1156,21 @@ test("No seeded CODEX_HOME, no leg — the no-metered guarantee is enforced, not
     !("OPENAI_API_KEY" in codexCliEnv({ CODEX_HOME: "/seeded", OPENAI_API_KEY: "sk", ALLOW_METERED: "true" })),
     "a plan run must not carry a key the CLI could prefer"
   );
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const body = src.slice(src.indexOf("async function runCodex"), src.indexOf("export async function callGeminiModel"));
   assert.match(body, /codexAuthMode\(\)/, "runCodex must decide its credential mode before spawning");
   assert.match(body, /mode === "none"/, "and refuse outright when it has neither credential");
 });
 
 test("The Codex spawn is ASYNC — a multi-minute sync child would freeze Gemini's retry timers", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const call = src.slice(src.indexOf("async function callCodexCli"), src.indexOf("async function runCodex"));
   assert.equal(/spawnSync\(/.test(call), false, "spawnSync inside the Promise.all fan-out serializes the panel");
   assert.match(call, /await spawnCapture\(/);
 });
 
 test("a killed Claude leg says it was killed, and its budget is measured not guessed", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   // The budget was 180s while the codex leg reading the SAME diff had 900s and logged
   // 351s on a 55k-char one. Same validation as the codex helper: a bare `> 0` accepts
   // 999 (a one-second budget) and 2147483648 (which wraps), so every run would time out.
@@ -1177,7 +1195,7 @@ test("a killed Claude leg says it was killed, and its budget is measured not gue
 });
 
 test("the Codex leg timeout is 900s (measured 268s + headroom) and every run logs its duration", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   // The 300s limit was a guess with 11% headroom over the only measured run; it timed out
   // the very next run. The limit must be the named constant (env-overridable), and the
   // measured duration must be logged unconditionally so the next adjustment has data.
@@ -1198,7 +1216,7 @@ test("the Codex leg timeout is 900s (measured 268s + headroom) and every run log
 });
 
 test("the GPT leg's DEFAULT path is the Codex plan, and its spawn passes an explicit env", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const call = src.slice(src.indexOf("async function callCodexCli"), src.indexOf("async function runCodex"));
   assert.match(call, /env: codexCliEnv\(process\.env\)/, "the spawn must pass an explicit minimal env, never inherit");
   const codexArgs = codexCliArgs("gpt-5.6-sol");
@@ -1303,7 +1321,7 @@ test("a leg that billed and then FAILED still reports its spend as estimated", (
 // exit is the only return without `attempts`, and every path that entered the try carries
 // one (possibly empty).
 test("ONLY the never-called path omits `attempts` — every other exit carries it", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const fn = src.slice(src.indexOf("async function runGemini"), src.indexOf("export async function runCoordinator"));
   const returns = fn.match(/return \{[\s\S]*?\};|return \{[^}]*\}/g) || [];
   const legReturns = returns.filter((r) => /model: "gemini"/.test(r));
@@ -1397,7 +1415,7 @@ test("Gemini billed attempts sum usage and price each model at its own rate", ()
 });
 
 test("the billing window closes only after the coordinator returns", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const main = src.slice(src.indexOf("async function main()"));
   const coordinator = main.indexOf("await runCoordinator(clusters, diff)");
   const settle = main.indexOf("setTimeout(r, bucketCloseMs + SETTLE_MS)");
@@ -1426,7 +1444,7 @@ test("the billing window closes only after the coordinator returns", () => {
 });
 
 test("--bare is GONE from the CLI invocation (it disables subscription auth)", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const call = src.slice(src.indexOf("async function callClaudeCli"), src.indexOf("async function runClaude"));
   assert.equal(
     claudeCliArgs("claude-opus-5", "sys").includes("--bare"),
@@ -1500,7 +1518,7 @@ test("neither leg's refusal list is a subset of the other's blind spot", () => {
 });
 
 test("Claude-family metered API paths are deleted", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   assert.equal(/callClaudeApi/.test(src), false);
   assert.equal(/new Anthropic/.test(src), false);
   assert.equal(/allowMetered/.test(src), false);
@@ -1555,13 +1573,13 @@ test("spawnCapture kills a hung child at the timeout and says so", async () => {
 });
 
 test("the OpenAI invoice check watches the only callable GPT model", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   assert.match(src, /const gptModels = \[CODEX_MODEL\]/);
   assert.match(src, /openaiMeteredOutputTokens\(\{ adminKey: openaiAdminKey, sinceEpoch: billingSinceEpoch, models: gptModels \}\)/);
 });
 
 test("Plan-only zeroing is structural — no Anthropic or OpenAI SDK is importable here", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   assert.doesNotMatch(src, /@anthropic-ai\/sdk/);
   assert.doesNotMatch(src, /\bfrom\s+["']openai["']/);
   assert.doesNotMatch(src, /\bimport\s*\(\s*["']openai["']\s*\)/);
@@ -1741,7 +1759,7 @@ test("unverified plan legs still contribute exactly zero to metered_usd", () => 
 });
 
 test("the ledger banks completed leg spend before the coordinator or billing settle", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const main = src.slice(src.indexOf("async function main()"));
   const legs = main.indexOf("const legs = [claudePair[0], claudePair[1], openaiLeg, geminiLeg]");
   const timestamp = main.indexOf("const ledgerRanAtUtc = new Date().toISOString()", legs);
@@ -1966,7 +1984,7 @@ test("a missing bank row is a normal logged verdict outcome", async () => {
 });
 
 test("final verdict is fired after coordinator and invoice settle", () => {
-  const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
+  const src = readSource();
   const main = src.slice(src.indexOf("async function main()"));
   const coordinator = main.indexOf("await runCoordinator(clusters, diff)");
   const settle = main.indexOf("setTimeout(r, bucketCloseMs + SETTLE_MS)");
