@@ -26,8 +26,14 @@ gh workflow run tribunal.yml -f pr_number=42
 
 Run it on the commit you are about to merge. It posts one comment and updates that same comment on re-runs.
 
-> **Not on npm yet.** Until it is, run the CLI from a clone (`node bin/tribunal.mjs init`) and point the workflow at a checkout with
-> `gh variable set TRIBUNAL_PACKAGE --body 'github:OWNER/REPO#main'`. The workflow prints that command itself if the install step fails.
+> **Not on npm yet.** Until it is, `npx tribunal-review` has nothing to fetch. Clone this
+> repository and run `node bin/tribunal.mjs init` from it, then point your workflow here:
+>
+> ```
+> gh variable set TRIBUNAL_PACKAGE --body 'github:ViktoriousLLC/tribunal-review#main'
+> ```
+>
+> The workflow prints that exact command itself if its install step fails.
 
 ## What you get for what you have
 

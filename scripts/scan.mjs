@@ -42,8 +42,12 @@ const RULES = [
   // appearing in source, comments, tests, the README, or the workflow is not.
   { id: "owner-name", re: /\bvik(?:rant)?\b/gi, note: "author's name outside the authorship files",
     exempt: ["LICENSE", "package.json"] },
+  // The README is exempt as of the day this repository went public: it has to name the
+  // repository it lives in, because the install instruction IS a repository path and
+  // "OWNER/REPO" is a puzzle rather than an instruction. The rule still holds everywhere
+  // else, where an organisation name is a leak rather than an address.
   { id: "private-org", re: /viktorious/gi, note: "organisation name outside the authorship files",
-    exempt: ["LICENSE", "package.json"] },
+    exempt: ["LICENSE", "package.json", "README.md"] },
   { id: "private-repo", re: /NewJobAlertTool|\bNJAT\b/g, note: "private repository name" },
   { id: "private-domain", re: /newpmjobs/gi, note: "product domain" },
   // /home/runner is the GitHub Actions runner's own home and is legitimate here.
