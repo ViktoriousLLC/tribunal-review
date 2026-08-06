@@ -1,125 +1,69 @@
 # Tribunal
 
-**It reviews your pull requests on the AI subscriptions you already pay for, and it proves what each run cost by reading the provider's invoice.**
+**Several AI models review your pull request independently. A blinded judge reconciles what they found. It runs on the AI subscriptions you already pay for.**
 
-Not another API key with a meter running. If you have a Claude subscription and a ChatGPT subscription, you already have everything two of the three review legs need, and they add nothing to your bill. The only optionally-metered leg is Gemini, and it stays off until you set `ALLOW_METERED=true` on purpose. **Any one** of the three is enough to get a review; you do not need all of them.
+- **No new bill.** A Claude or ChatGPT subscription is enough. Both legs run at no per-call cost. An API key works instead if you have no subscription, billed per call, and only after you explicitly opt in.
+- **Independent, then reconciled.** Each model reads the diff cold, in its own context. A judge that cannot see which model produced which finding merges the duplicates, ranks what is left, and says where they disagreed.
+- **It tells you what it cost.** Where it can, it checks the run against the provider's own billing API. Where it cannot, it says **unverified** rather than printing a zero it did not measure.
 
-**No subscription? Use an API key.** `init` asks that as a follow-up, and only if you said you have no subscription for that vendor, so you never end up configuring both and wondering which one is being charged. Pay-per-call legs report an estimate of what they spent, priced from their own token counts. It is labelled as an estimate everywhere it appears, because it is not checked against the provider invoice.
-
-**How that avoids the trap it looks like.** `ANTHROPIC_API_KEY` outranks the subscription token in the Claude CLI's own auth order, so an environment holding both silently bills the key while everything reports "plan". That is exactly how this panel spent about $62 in nine days while printing `$0.0000 (plan)` on every pull request. The protection is mechanical rather than a warning: one function decides the mode and forwards **exactly one** credential, and **the subscription always wins**. The environment that caused the incident cannot be constructed. And no key bills anything until you also set `ALLOW_METERED=true`, so a key sitting in your secrets is inert.
-
-The second half matters more than it sounds. Most tools that claim to be free are inferring it from a config flag. This one asks the provider's own usage API what it was actually billed, before and after the run, and reports the difference. When it cannot get an answer it prints **unverified** rather than a number it made up.
-
-That exists because of a specific failure. For nine days this panel printed `$0.0000 (plan)` on every pull request while billing a metered API key about $62. Three separate surfaces each inferred "free" from the presence of a subscription token, and none of them measured. The lesson is in the code now: **a claim of free that nothing measured is not evidence, it is an echo.**
-
-What it does with the diff, since you asked: several models review it independently from a fresh context, a blinded judge that cannot see which model produced which finding reconciles and ranks them, and one comment is posted and upserted on re-runs.
-
-## The first five minutes
-
-> **Not on npm yet.** Until it is, `npx tribunal-review` has nothing to fetch. Run the CLI
-> straight from a clone (`node bin/tribunal.mjs init`), and point the workflow at a
-> checkout instead of the registry:
-> `gh variable set TRIBUNAL_PACKAGE --body 'github:OWNER/REPO#main'`.
-> The workflow prints exactly that command if the install step fails, rather than leaving
-> you with a bare npm 404.
+## Quick start
 
 ```
 npx tribunal-review init
 ```
 
-Four questions. It never asks for a secret's value, only for which kinds of access you have, so it knows which review legs to switch on. Then it writes `.github/workflows/tribunal.yml` and a starter `.tribunal/review-gates.md`, and prints the exact `gh secret set` commands to paste.
-
-```
-npx tribunal-review doctor
-```
-
-Prints which credentials are present in the current environment, and for each missing one, what it would unlock. Safe to run in CI. It reads presence, never values, and prints no secret.
-
-**That checks your machine, not your repository.** The panel runs on GitHub, so after you have pasted the secrets in, this is the one that answers "did my setup work":
+Four questions about what access you have. It never asks for a secret's value. It writes your workflow and prints the exact `gh secret set` commands for the answers you gave.
 
 ```
 npx tribunal-review doctor --repo
 ```
 
-It asks GitHub which secret NAMES exist (GitHub never returns a value, to anyone), tells you **which legs will actually run on your next dispatch**, and prints the exact command for anything still missing. Add `owner/name` to check a repository you are not standing in.
-
-Lost the setup commands when your terminal scrolled? They are not gone:
-
-```
-npx tribunal-review setup
-```
-
-Then, on the final commit of a pull request:
+Asks GitHub what your repository actually has, and tells you which reviewers will run on your next dispatch. This is the "did my setup work" command.
 
 ```
 gh workflow run tribunal.yml -f pr_number=42
 ```
 
-## What runs with what you have
+Run it on the commit you are about to merge. It posts one comment and updates that same comment on re-runs.
 
-| You have | Legs that run | What the comment says |
-|---|---|---|
-| Nothing | none | it still posts a comment, naming every leg that could not run and what would enable it. Exits 0, no red X on your PR. |
-| Only API keys, plus `ALLOW_METERED=true` | the same legs your keys cover, billed per call | reports a token-based ESTIMATE of what each leg spent, never called verified |
-| A Claude subscription | reviewer + judge | names the legs that did not run, and why |
-| Claude + a ChatGPT subscription usable by the Codex CLI | two reviewers + judge | same |
-| The above plus a Gemini API key **and** `ALLOW_METERED=true` | three reviewers + judge | states that the metered leg ran and across how many billed attempts. The dollar figure stays in the CI log, not in a public comment |
-| Plus organisation admin keys | unchanged | costs are **verified against the invoice** instead of reported as unverified |
+> **Not on npm yet.** Until it is, run the CLI from a clone (`node bin/tribunal.mjs init`) and point the workflow at a checkout with
+> `gh variable set TRIBUNAL_PACKAGE --body 'github:OWNER/REPO#main'`. The workflow prints that command itself if the install step fails.
 
-Two things follow from that table and both are deliberate.
+## What you get for what you have
 
-**A configured leg that could not run is always named in the comment.** It never silently disappears. Silence reads as a clean review, and that is exactly the failure this tool was built around.
-
-**A metered key alone never starts billing you.** The Gemini leg needs the key *and* the explicit `ALLOW_METERED=true` opt-in. Two locks, because installing a tool should not be able to open an account with a payment method attached.
-
-## Running the tests
-
-201 tests, no dependencies, no build step:
-
-```
-npm test
-```
-
-They run on every pull request here too. A guard nothing exercises is the exact defect
-this package exists to catch, so it would be poor form to ship one.
-
-## The one file that makes it yours
-
-`.tribunal/review-gates.md` is read at review time and prepended to every reviewer's instructions. Write down the mistakes your project actually makes. A gate that says "look for bugs" changes nothing. A gate that names your own recurring failure is worth ten generic ones. Without the file the panel still works and reviews generically.
-
-Point it somewhere else with `TRIBUNAL_GATES_FILE`. If you already use Claude Code and have `.claude/agents/change-reviewer.md`, that is picked up automatically with no configuration. If you set `TRIBUNAL_GATES_FILE` and the file cannot be read, the run says so loudly rather than quietly falling back.
-
-**The gates file is read from your default branch, not from the pull request.** That is deliberate: an untrusted pull request must not be able to rewrite the reviewer's own instructions. It also means edits to your gates file take effect after they merge, not while you are iterating on them in a branch.
-
-## What you need installed
-
-Node 20 or newer, the GitHub CLI for the setup commands, and a GitHub repository with Actions enabled. The panel itself has no runtime dependencies; the workflow installs the provider CLIs it needs, and only the ones your credentials enable. Everything installs into a scratch directory on the runner, never into your repository's `node_modules`.
-
-## Assumptions, stated plainly
-
-- **GitHub, with Actions.** No GitLab, no Bitbucket.
-- **Dispatch, not automatic.** It runs when you fire it, on the commit you are about to merge. It does not review every push, on purpose: that reviews snapshots you are about to change, and bills for each one.
-- **Advisory, and it cannot be made blocking as shipped.** A dispatched run's check attaches to the dispatched ref, not to the pull request head, so it never becomes a required status check. Making it blocking would mean triggering on every push, which is the trade this workflow deliberately does not make.
-- **The diff is truncated** past a size limit. On a very large pull request the models see part of it, so an empty finding list on a huge diff means less than it looks like.
-- **The Codex CLI version is pinned** because the parser is coupled to that version's JSON event shape. A newer CLI may break the GPT leg.
-- **Codex plan tokens rotate roughly every eight days** and the runner is ephemeral, so the stored secret eventually goes stale. When it does, the GPT leg fails loudly in the comment with the exact refresh command. It never falls back to a credit card.
-- **The comments explain real incidents.** Most of them describe something that actually went wrong once, which is why they are long. The internal ticket ids they used to carry have been removed; the reasoning is the part worth keeping.
-
-## If your setup differs
-
-| Situation | What happens |
+| You have | What runs |
 |---|---|
-| No credentials at all | Posts a comment saying no legs ran and what each one needs. Exits 0, no failed check. |
-| Only some credentials | Runs those legs, names the rest as not run. |
-| No `.tribunal/review-gates.md` | Generic review, plus a log line telling you what you are missing. |
-| Your own infrastructure email addresses in the diff | Redacted before the models see them, unless you list your domains in `TRIBUNAL_EMAIL_KEEP_DOMAINS`. **Use bare names with no dot and no TLD**: `TRIBUNAL_EMAIL_KEEP_DOMAINS=my-product,my-org`, not `my-product.com`. An entry containing a dot is rejected and the run logs which one it dropped. |
-| A fork opens the pull request | A fork cannot dispatch the workflow, so no fork can start a run that holds your secrets. Note the limit of that guarantee: if **you** dispatch it against a fork PR number, fork-authored diff content is read by a job that holds them. The diff is data, never instructions, and secrets are never echoed, but dispatch a fork PR only when you would review it by hand. |
-| The provider changes its usage API | Cost verification degrades to **unverified**. It never guesses. |
+| Nothing | No reviewers. It still comments, naming each leg and what would enable it, and exits without failing your build. |
+| A Claude subscription | One reviewer plus the blinded judge |
+| Claude and ChatGPT subscriptions | Two reviewers plus the judge |
+| Either of the above, plus a Gemini key and `ALLOW_METERED=true` | Three reviewers plus the judge |
+| An API key instead of a subscription | The same reviewers, billed per call |
+| Plus read-only billing keys | Costs verified against the invoice instead of reported as unverified |
+
+Two rules hold throughout. **A leg that could not run is always named in the comment**, because silence reads as a clean review. And **a key alone never starts billing you**: anything metered needs the key *and* `ALLOW_METERED=true`.
+
+## Make the review yours
+
+`.tribunal/review-gates.md` is prepended to every reviewer's instructions. Write down the mistakes your project actually makes. "Look for bugs" changes nothing; one gate naming your own recurring failure is worth ten generic ones. Without the file it still works and reviews generically.
+
+It is read from your default branch, never from the pull request, so an untrusted PR cannot rewrite the reviewer's own instructions.
+
+## Why it checks its own bill
+
+Tools that claim to be free usually infer it from a config flag rather than measuring. That inference fails quietly: a panel can report `$0.0000 (plan)` on every pull request while an API key is being charged the whole time, because the key silently outranks the subscription token in the CLI's auth order.
+
+So this one asks the provider what it was actually billed, before and after each run. If it cannot get an answer it prints unverified. Subscription and API credentials are never placed in the same environment, and the subscription always wins, so the situation that causes that failure cannot arise.
+
+## Requirements and limits
+
+Node 20 or newer, the GitHub CLI, and a GitHub repository with Actions on. No runtime dependencies; the workflow installs the provider CLIs your credentials enable, into a scratch directory, never into your `node_modules`.
+
+- **GitHub only**, with Actions.
+- **You dispatch it**, it does not review every push. That is deliberate: reviewing snapshots you are about to change costs time and money for nothing.
+- **Advisory.** A dispatched run cannot be a required status check, so it never blocks a merge.
+- **Large diffs are truncated**, and the comment says so. An empty finding list on a huge diff means less than it looks like.
+- **Subscription credentials expire** (roughly weekly for Codex). When one does, that leg fails loudly in the comment with the refresh command. It never falls back to a credit card.
 
 ## Support
 
-Provided as-is. Issues may not get a response. Forks are welcome.
-
-## License
-
-MIT.
+Open an issue. MIT licensed.
