@@ -905,8 +905,6 @@ export function renderComment(clusters, legs, opts = {}) {
     );
   }
 
-  if (opts.modelFreshnessMarkdown) out.push(opts.modelFreshnessMarkdown, "");
-
   // Hidden machine-readable record for an external job to harvest at merge time.
   // base64 so model-authored text containing "-->" can't truncate the close marker
   // and silently destroy the record (caught in review).
@@ -2832,12 +2830,6 @@ async function main() {
     console.log(`  ↷ PR running total unavailable (state: ${evalRunningTotal.state}).`);
   }
 
-  // A model-freshness footer used to be rendered here from a sibling module in the
-  // origin repo. It is not part of this package: the import walked out of the package
-  // directory into the consuming repository, which either always failed or, worse,
-  // imported and executed whatever happened to sit at that path. Removed rather than
-  // reimplemented — a published package must never resolve code outside itself.
-  const modelFreshnessMarkdown = undefined;
   const comment = renderComment(clusters, legs, {
     // From the payload the legs actually received, never re-derived here.
     diffCoverage: diffCoverage(lastSentDiffChars() ?? redactSensitive(diff).length),
@@ -2846,7 +2838,6 @@ async function main() {
     billing,
     openaiBilling,
     evalRunningTotal,
-    modelFreshnessMarkdown,
     headSha: meta.headSha,
   });
 
