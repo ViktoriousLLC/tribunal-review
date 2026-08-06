@@ -1854,7 +1854,7 @@ function claudeNeutralCwd() {
  *
  * Result: every Opus finder leg, every Fable leg and the Opus coordinator billed the
  * metered API (plus the CLI's own internal Haiku background calls), while this file
- * cheerfully reported "plan, $0.0000". ~$62 of Anthropic credits in 9 days.
+ * cheerfully reported "plan, $0.0000". real metered spend, over more than a week.
  *
  * So: an EXPLICIT, MINIMAL env with the plan token and never an API key. It also closes
  * a real secret gap: the leg is an LLM reading an UNTRUSTED diff and had GH_TOKEN /
@@ -1863,7 +1863,7 @@ function claudeNeutralCwd() {
 /**
  * Which credential a leg will actually authenticate with: "plan", "metered", or "none".
  *
- * THE PLAN ALWAYS WINS. Not as a preference — as the mechanism. The $62 incident needed
+ * THE PLAN ALWAYS WINS. Not as a preference — as the mechanism. That incident needed
  * BOTH credentials present in one environment, because the API key outranks the plan token
  * in the CLI's own auth order. Deciding the mode here, and forwarding exactly one
  * credential, means that environment cannot be constructed. A subscription holder who also
@@ -2782,7 +2782,7 @@ async function main() {
     console.log(billingLogLine(v));
     if (v.state === "billed") {
       // Loud, and impossible to mistake for a green run. This is the alarm that did not
-      // exist while ~$62 walked out the door.
+      // exist while real money walked out the door.
       console.log(`::error title=Eval reviewer billed the metered ${v.provider} API::${v.detail}`);
     }
   }

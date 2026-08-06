@@ -3,7 +3,7 @@
 //
 // Every layer that reported the Claude legs as free was inferring, not measuring:
 // the reviewer read a secret's presence, the digest read a hardcoded label, and the
-// job that reads the real invoice was never checked against them. ~$62 walked out
+// job that reads the real invoice was never checked against them. real money walked out
 // while three surfaces agreed it was $0.
 import test from "node:test";
 import assert from "node:assert/strict";

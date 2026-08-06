@@ -732,7 +732,7 @@ test("runCoordinator: FAIL-OPEN — no plan token → null (no network); empty c
 });
 
 // ── The metered-billing leak ────────────────────────────────────────────────
-// The Claude legs billed the metered Anthropic API for a week (~$62) while this file
+// The Claude legs billed the metered Anthropic API for over a week while this file
 // printed "$0.0000 (plan)". Two causes, both pinned below:
 //   1. spawnSync passed NO env, so the CLI inherited ANTHROPIC_API_KEY from the workflow
 //      — and ANTHROPIC_API_KEY OUTRANKS CLAUDE_CODE_OAUTH_TOKEN in Claude Code's auth
@@ -2295,7 +2295,7 @@ test("an unresolvable path falls back rather than silently deciding not to run",
 
 // ---------- the pay-per-call route ----------
 // Added so somebody with an API key and no subscription can use the tool at all. The
-// safety property it must NOT break: the $62 incident needed BOTH credentials in one
+// safety property it must NOT break: that incident needed BOTH credentials in one
 // environment, because the API key outranks the plan token in the CLI's own auth order.
 // These pin that such an environment cannot be built.
 
@@ -2309,7 +2309,7 @@ test("the plan always wins, so both credentials can never be in one environment"
   assert.equal(claudeAuthMode(both), "plan");
   const env = claudeCliEnv(both);
   assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, "plan-token");
-  assert.ok(!("ANTHROPIC_API_KEY" in env), "the key must not ride along with the plan token — that is the $62 environment");
+  assert.ok(!("ANTHROPIC_API_KEY" in env), "the key must not ride along with the plan token — that is the environment that caused it");
 });
 
 test("a key alone never bills: ALLOW_METERED is a second, separate lock", () => {

@@ -1,7 +1,7 @@
 // PROVE IT, DON'T ASSUME IT.
 //
 // This module exists because the panel reported "on the plan" on every pull request
-// for nine days while a metered invoice quietly grew. Nothing had actually checked
+// for over a week while a metered invoice quietly grew. Nothing had actually checked
 // what the run was billed to.
 //
 // The reason that bug survived is worth stating plainly: EVERY layer
@@ -179,7 +179,7 @@ export async function meteredOutputTokens({ adminKey, sinceIso, models, allowEmp
         out += x.output_tokens;
       }
     }
-    // This is the path the $62 walked out of, and it is the one that lacked the
+    // This is the path that money walked out of, and it is the one that lacked the
     // guard. A row with no model field means group_by[] did not take effect for that row,
     // so its output_tokens cannot be attributed and silently dropping it understates spend.
     //

@@ -155,7 +155,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
           # ANTHROPIC_API_KEY IS DELIBERATELY NOT HERE.
           #
-          # It used to be, and it cost ~$62 in nine days: the CLI's auth chain
+          # It used to be, and it cost real money over more than a week: the CLI's auth chain
           # ranks ANTHROPIC_API_KEY ABOVE the plan token, so merely HAVING the key in the
           # environment moved the Opus + Fable + coordinator legs onto metered billing —
           # while the reviewer printed "$0.0000 (plan)".
@@ -172,7 +172,7 @@ jobs:
           # reviewer reports "unverified", never "plan".
           ANTHROPIC_ADMIN_KEY: ${{ secrets.ANTHROPIC_ADMIN_KEY }}
           # THE PAY-PER-CALL ROUTE, for people who have an API key and no subscription.
-          # Read the paragraph above before assuming this reopens the $62 hole: it does not,
+          # Read the paragraph above before assuming this reopens that hole: it does not,
           # and the reason is mechanical rather than a promise. `claudeCliEnv()` decides the
           # mode and forwards EXACTLY ONE credential, and the plan always wins — so the
           # environment that caused that incident, both credentials present at once with the
