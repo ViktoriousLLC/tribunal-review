@@ -1,6 +1,6 @@
 # The package's own tests, on every pull request.
 #
-# 201 of them exist and nothing was running them, which is the same shape as the
+# Hundreds of them exist and nothing was running them, which is the same shape as the
 # defect this whole package is about: a control that exists, is believed in, and
 # is never actually exercised.
 #

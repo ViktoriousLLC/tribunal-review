@@ -60,7 +60,7 @@ jobs:
       # The GPT leg's Codex PLAN credential. Job-level (not step-level) because a
       # step's own `if:` cannot see env defined on that same step.
       CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-      # The ONLY metered leg needs BOTH: the key, and an explicit opt-in. Holding a
+      # A metered leg needs BOTH: the key, and an explicit opt-in. Holding a
       # key is not consent to spend it, so the leg stays off until ALLOW_METERED is
       # literally "true". Job-level for the same `if:` reason as above.
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -164,7 +164,7 @@ jobs:
           # DO NOT HOLD. The Claude legs are plan-only. With no plan token they FAIL
           # LOUDLY and say so in the comment; they never quietly reach for a credit card.
           #
-          # Opus, Fable, and the blinded coordinator are plan-only forever. The code
+          # Opus, Fable, and the blinded coordinator are plan-first, with a pay-per-call route only for those who have no subscription. The code
           # hands their CLI an env that cannot contain an API key. If the plan credential
           # is lost, the affected leg fails loudly instead of quietly reaching for a card.
           # Read-only org billing key. Used ONLY to VERIFY, against the real invoice, that

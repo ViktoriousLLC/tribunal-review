@@ -40,7 +40,7 @@
 //   CODEX_AUTH_JSON     — the GPT leg's Codex PLAN credential; the workflow
 //                         writes it to $CODEX_HOME/auth.json. Absent → the leg is skipped,
 //                         never silently bought.
-//   GEMINI_API_KEY      — the Gemini leg, and THE ONLY METERED ONE. Optional. Skipped
+//   GEMINI_API_KEY      — the Gemini leg, and the only leg metered BY DEFAULT. Optional. Skipped
 //                         if absent, and skipped ANYWAY unless ALLOW_METERED is "true":
 //                         holding a key is not consent to spend it.
 // Optional tuning env:
@@ -478,17 +478,25 @@ export function normalizeFindings(parsed) {
     let confidence = Number(f.confidence);
     if (!Number.isFinite(confidence)) confidence = 0.5;
     confidence = Math.max(0, Math.min(1, confidence));
-    const title = String(f.title || "").trim().slice(0, 200);
+    // REDACTED ON THE WAY OUT, not only on the way in.
+    //
+    // The diff and the PR body are redacted before a model sees them. Everything the model
+    // writes back was only being length-clipped, and it goes straight into a comment on a
+    // public pull request. The model has just read an untrusted diff, so its output is
+    // untrusted too: anything it was persuaded to echo, or simply quoted from the diff,
+    // was published verbatim. Same function, other direction.
+    // (Found by an independent GPT pass over this repository after it went public.)
+    const title = redactSensitive(String(f.title || "").trim()).slice(0, 200);
     if (!title) continue; // a finding with no title is noise
     out.push({
       severity,
       category,
       confidence,
-      file: String(f.file || "").trim().slice(0, 300) || "(unspecified)",
+      file: redactSensitive(String(f.file || "").trim()).slice(0, 300) || "(unspecified)",
       line: Number.isFinite(Number(f.line)) ? Number(f.line) : null,
       title,
-      why: String(f.why || "").trim().slice(0, 1500),
-      fix: String(f.fix || "").trim().slice(0, 1500),
+      why: redactSensitive(String(f.why || "").trim()).slice(0, 1500),
+      fix: redactSensitive(String(f.fix || "").trim()).slice(0, 1500),
     });
   }
   return out;
@@ -1905,6 +1913,15 @@ async function callClaudeCli(model, system, user) {
     [
       "-p",
       "Review the PR content provided on stdin, following your system instructions exactly. Output ONLY the JSON object.",
+      // ENFORCED, not requested. The system prompt tells this model it cannot run git or
+      // read files beyond the diff, and a sentence in a prompt is not a boundary: the
+      // input it is reading is an UNTRUSTED diff that may be trying to talk to it. This
+      // process holds a subscription credential, so "please do not" is the wrong control.
+      // Every tool that could reach the filesystem, the network or a shell is refused at
+      // the CLI, which is a thing the model cannot argue with.
+      // (Found by an independent GPT pass over this repository after it went public.)
+      "--disallowedTools",
+      "Bash,Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,Task",
       // `--bare` is GONE. It was here to skip `.claude` auto-discovery, but the
       // real workspace-trust fix has always been the neutral cwd below (the trust
       // --bare alone insufficient) — so it was redundant, AND it silently disabled

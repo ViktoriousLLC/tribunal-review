@@ -8,14 +8,21 @@
 
 ## Quick start
 
-```
-npx tribunal-review init
-```
-
-Four questions about what access you have. It never asks for a secret's value. It writes your workflow and prints the exact `gh secret set` commands for the answers you gave.
+Not on npm yet, so clone this repository and run it from there:
 
 ```
-npx tribunal-review doctor --repo
+git clone https://github.com/ViktoriousLLC/tribunal-review && cd tribunal-review
+node bin/tribunal.mjs init
+```
+
+Four questions about what access you have. It never asks for a secret's value. It writes your workflow and prints the exact `gh secret set` commands for the answers you gave. Then point your workflow at this repository, which it will also tell you to do if you forget:
+
+```
+gh variable set TRIBUNAL_PACKAGE --body 'github:ViktoriousLLC/tribunal-review#main'
+```
+
+```
+node bin/tribunal.mjs doctor --repo
 ```
 
 Asks GitHub what your repository actually has, and tells you which reviewers will run on your next dispatch. This is the "did my setup work" command.
@@ -26,23 +33,14 @@ gh workflow run tribunal.yml -f pr_number=42
 
 Run it on the commit you are about to merge. It posts one comment and updates that same comment on re-runs.
 
-> **Not on npm yet.** Until it is, `npx tribunal-review` has nothing to fetch. Clone this
-> repository and run `node bin/tribunal.mjs init` from it, then point your workflow here:
->
-> ```
-> gh variable set TRIBUNAL_PACKAGE --body 'github:ViktoriousLLC/tribunal-review#main'
-> ```
->
-> The workflow prints that exact command itself if its install step fails.
-
 ## What you get for what you have
 
 | You have | What runs |
 |---|---|
 | Nothing | No reviewers. It still comments, naming each leg and what would enable it, and exits without failing your build. |
-| A Claude subscription | One reviewer plus the blinded judge |
-| Claude and ChatGPT subscriptions | Two reviewers plus the judge |
-| Either of the above, plus a Gemini key and `ALLOW_METERED=true` | Three reviewers plus the judge |
+| A Claude subscription | Two reviewers plus the blinded judge |
+| Claude and ChatGPT subscriptions | Three reviewers plus the judge |
+| Either of the above, plus a Gemini key and `ALLOW_METERED=true` | Four reviewers plus the judge |
 | An API key instead of a subscription | The same reviewers, billed per call |
 | Plus read-only billing keys | Costs verified against the invoice instead of reported as unverified |
 

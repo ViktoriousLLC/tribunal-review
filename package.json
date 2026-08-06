@@ -1,7 +1,7 @@
 {
   "name": "tribunal-review",
   "version": "0.1.0",
-  "description": "Reviews pull requests on the AI subscriptions you already pay for, and proves what each run cost by reading the provider invoice.",
+  "description": "Reviews pull requests on the AI subscriptions you already pay for, and checks each run against the provider billing API rather than assuming it was free.",
   "type": "module",
   "bin": {
     "tribunal": "./bin/tribunal.mjs"
