@@ -169,7 +169,20 @@ export async function meteredOutputTokens({ adminKey, sinceIso, models, allowEmp
           sawUngroupedRow = true;
           continue;
         }
-        if (!want.has(x.model)) continue;
+        // Snapshot-aware, exactly like the OpenAI reader. An EXACT match silently drops
+        // a row billed as `claude-opus-5-2026-01-31`, and a dropped row shrinks the
+        // delta, and a shrunken delta renders as "plan (verified)". A clone inherits its
+        // sibling's bugs, and this file has been the proof twice now: the hardening went
+        // one way last time and had to come back the other.
+        const attribution = classifyModelRow(String(x.model), models);
+        if (attribution === "other") continue;
+        if (attribution === "ambiguous") {
+          return unmeasurable(
+            `usage report row "${x.model}" starts with one of the panel's models but is not a dated ` +
+              "snapshot of it, so it cannot be attributed. Counting it would over-report and skipping " +
+              "it would under-report, and an under-read renders as plan-covered."
+          );
+        }
         // `?? 0` on a row we are actually counting turns a missing field into a verified
         // zero — the same defect as the empty envelope, one level further down. A row for
         // OUR model that carries no usable token count is unmeasurable, not free.

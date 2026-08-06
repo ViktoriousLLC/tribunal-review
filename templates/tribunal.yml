@@ -65,6 +65,10 @@ jobs:
       # literally "true". Job-level for the same `if:` reason as above.
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       ALLOW_METERED: ${{ vars.ALLOW_METERED }}
+      # Job level so the install steps' `if:` can see them; a step cannot read env
+      # declared on that same step.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Deliberately ungated so the dedup step below runs on the pinned node.
@@ -113,7 +117,7 @@ jobs:
         if: steps.dedup.outputs.skip != 'true' && env.GEMINI_API_KEY != '' && env.ALLOW_METERED == 'true'
         run: npm install --no-save --prefix "$RUNNER_TEMP/tribunal" @google/genai@2.7.0
       - name: Install Claude CLI (only when running Claude on the subscription)
-        if: steps.dedup.outputs.skip != 'true' && env.CLAUDE_CODE_OAUTH_TOKEN != ''
+        if: steps.dedup.outputs.skip != 'true' && (env.CLAUDE_CODE_OAUTH_TOKEN != '' || (env.ANTHROPIC_API_KEY != '' && env.ALLOW_METERED == 'true'))
         run: npm install -g @anthropic-ai/claude-code@2.1.220   # pinned for the same reason as everything else here
       # The GPT leg runs on the CODEX PLAN, not the metered OpenAI API.
       - name: Install Codex CLI (the GPT leg, plan-authed)

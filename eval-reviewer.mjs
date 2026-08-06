@@ -2516,10 +2516,12 @@ export async function runGemini(system, user) {
 // advances). Under the default config the two ids are identical, so the Set dedups
 // to one and there is no second attempt.
 export async function runCoordinator(clusters, diff) {
-  // Plan-only: the metered API path is absent. The invoice verdict printed after
-  // this call is the cost claim for the run.
-  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    console.log("  ↷ Coordinator skipped: CLAUDE_CODE_OAUTH_TOKEN not set (plan-only) — falling back to mechanical output.");
+  // Whichever Claude credential exists, same as the finder legs. This gated on the plan
+  // token alone, which silently deleted the blinded judge for every pay-per-call user:
+  // they would have been sold a panel with a judge and quietly given the mechanical
+  // fallback instead. Caught by the full panel reviewing the change that added the route.
+  if (claudeAuthMode() === "none") {
+    console.log("  ↷ Coordinator skipped: no Claude credential — falling back to mechanical output.");
     return null;
   }
   if (!Array.isArray(clusters) || clusters.length === 0) return null; // nothing to reconcile
