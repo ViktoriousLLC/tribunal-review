@@ -1486,7 +1486,7 @@ export function buildSystemPrompt(reviewerMd) {
   return [preamble, base, JSON_CONTRACT].filter(Boolean).join("\n\n");
 }
 
-function buildUserMessage(title, body, diff) {
+export function buildUserMessage(title, body, diff) {
   // Redact the FULL diff BEFORE truncating, so a secret straddling the
   // MAX_DIFF_CHARS boundary can't have its tail escape masking (eval panel catch).
   const redactedDiff = redactSensitive(diff);
@@ -1496,17 +1496,23 @@ function buildUserMessage(title, body, diff) {
   // Wrap each author-controlled section in tags the system prompt designates as
   // untrusted data, so a crafted PR can't prompt-inject the reviewers (live review).
   // live review). The diff itself describes what the change claims to do.
+  // NEUTRALISED, not just wrapped. The coordinator's builder has always run its embedded
+  // blocks through neutralizeTag; this one did not, so a pull request TITLE containing
+  // `</pr_title>` closed the data boundary in every leg prompt and everything after it
+  // read as instructions. The system prompt does say this content is untrusted, and that
+  // is prose a model may ignore — the same argument this file uses to justify refusing
+  // tools at the CLI rather than asking the model not to use them.
   return [
     "<pr_title>",
-    redactSensitive(title) || "(none)",
+    neutralizeTag(redactSensitive(title), "pr_title") || "(none)",
     "</pr_title>",
     "",
     "<pr_description>",
-    body ? redactSensitive(body.slice(0, 4000)) : "(none)",
+    body ? neutralizeTag(redactSensitive(body.slice(0, 4000)), "pr_description") : "(none)",
     "</pr_description>",
     "",
     clipped ? `<diff truncated="${MAX_DIFF_CHARS} chars — note in your review if context is missing">` : "<diff>",
-    shown,
+    neutralizeTag(shown, "diff"),
     "</diff>",
   ].join("\n");
 }
