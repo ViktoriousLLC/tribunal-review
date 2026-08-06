@@ -46,3 +46,6 @@ is clean, say so and stop.
   means whichever the tool prefers wins silently.
 - **A control that cannot be turned off is not a control.** Anything that spends money
   must name the command that stops it, at the moment you agree to it.
+- **A capability granted by default is granted.** When a process holds a credential and
+  reads untrusted input, list what it is REFUSED rather than what it is asked not to do.
+  A sandbox that blocks writes is not blocking reads or egress.
