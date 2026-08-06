@@ -10,6 +10,7 @@
     "bin/",
     "templates/",
     "examples/",
+    "scripts/",
     "entrypoint.mjs",
     "eval-reviewer.mjs",
     "eval-dedup.mjs",
@@ -20,14 +21,17 @@
     "billing-verify.test.mjs",
     "seed-codex-auth.test.mjs",
     "README.md",
+    "KNOWN-ISSUES.md",
     "LICENSE",
-    "tribunal-cli.test.mjs"
+    "tribunal-cli.test.mjs",
+    "workflow-sync.test.mjs"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test eval-reviewer.test.mjs eval-dedup.test.mjs billing-verify.test.mjs seed-codex-auth.test.mjs tribunal-cli.test.mjs"
+    "test": "node --test eval-reviewer.test.mjs eval-dedup.test.mjs billing-verify.test.mjs seed-codex-auth.test.mjs tribunal-cli.test.mjs workflow-sync.test.mjs",
+    "sync:workflow": "node scripts/sync-workflow.mjs"
   },
   "keywords": [
     "code-review",

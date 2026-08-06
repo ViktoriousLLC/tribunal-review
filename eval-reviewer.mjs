@@ -58,10 +58,9 @@
 //
 // Exit codes: 0 always, UNLESS EVAL_BLOCKING=true and a qualifying blocker fires (1).
 
-import { pathToFileURL, fileURLToPath } from "node:url";
 import { isDirectInvocation, reportMisidentifiedEntrypoint } from "./entrypoint.mjs";
 import { meteredOutputTokens, openaiMeteredOutputTokens, billingVerdict, billingLogLine, SETTLE_MS } from "./billing-verify.mjs";
-import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 // A builtin, so a static import costs nothing (the lazy imports elsewhere exist to keep
 // the vendor SDKs out of a test-only import of this module).
 import { spawn as spawnProcess } from "node:child_process";
@@ -238,7 +237,7 @@ export function isCodexAuthFailure(e) {
   const m = String(e?.message || e || "").toLowerCase();
   // Deliberately NOT a bare `token` or `expired`: "prompt exceeds the model's token limit"
   // and "rate limit: tokens per minute" are healthy-credential failures, and matching them
-  // would tell you his secret had expired and hand him a rotate command for a working one.
+  // would tell you the secret had expired and hand you a rotate command for a working one.
   return /\bauth\b|authenticat|unauthor|\b401\b|\b403\b|not logged in|please run \/?login|credential|refresh_token|token (?:expired|is invalid|revoked)|session expired/.test(m);
 }
 export function codexFailureMessage(e) {
@@ -1909,34 +1908,70 @@ export function claudeCliEnv(source = process.env) {
   return env;
 }
 
+// ENFORCED, not requested. The system prompt tells this model it cannot run git or
+// read files beyond the diff, and a sentence in a prompt is not a boundary: the
+// input it is reading is an UNTRUSTED diff that may be trying to talk to it. This
+// process holds a subscription credential, so "please do not" is the wrong control.
+// Every tool that could reach the filesystem, the network, a shell or another agent is
+// refused at the CLI, which is a thing the model cannot argue with.
+// (Found by an independent GPT pass over this repository after it went public.)
+export const CLAUDE_REFUSED_TOOLS = [
+  "Bash",
+  "BashOutput",
+  "KillShell",
+  "Read",
+  "Write",
+  "Edit",
+  "MultiEdit",
+  "NotebookEdit",
+  "Glob",
+  "Grep",
+  "WebFetch",
+  "WebSearch",
+  "Task",
+  "Agent",
+  "SlashCommand",
+  "Skill",
+];
+
+/**
+ * The argv the Claude CLI gets. Exported so the refusals are asserted by a test rather
+ * than read out of a string buried in a spawn call.
+ */
+export function claudeCliArgs(model, system) {
+  return [
+    "-p",
+    "Review the PR content provided on stdin, following your system instructions exactly. Output ONLY the JSON object.",
+    "--disallowedTools",
+    CLAUDE_REFUSED_TOOLS.join(","),
+    // The denylist above only covers BUILT-IN tools. A machine that has configured MCP
+    // servers, hooks, skills or plugins at the user level hands this process a second set
+    // of tools the list has never heard of — and HOME is forwarded, so on a developer
+    // machine that set is not empty. These two say "load none of it": no settings file
+    // beyond the flags on this command line, and no MCP server from any configuration.
+    // The neutral cwd already covers the project side; this covers the user side.
+    "--setting-sources",
+    "",
+    "--strict-mcp-config",
+    // `--bare` is GONE. It was here to skip `.claude` auto-discovery, but the
+    // real workspace-trust fix has always been the neutral cwd below (the trust
+    // --bare alone insufficient) — so it was redundant, AND it silently disabled
+    // subscription auth, which is what forced every Claude leg onto the metered API.
+    "--append-system-prompt",
+    system,
+    "--model",
+    model,
+    "--output-format",
+    "json",
+  ];
+}
+
 async function callClaudeCli(model, system, user) {
   const { spawnSync } = await import("node:child_process");
   const startedAt = Date.now();
   const res = spawnSync(
     "claude",
-    [
-      "-p",
-      "Review the PR content provided on stdin, following your system instructions exactly. Output ONLY the JSON object.",
-      // ENFORCED, not requested. The system prompt tells this model it cannot run git or
-      // read files beyond the diff, and a sentence in a prompt is not a boundary: the
-      // input it is reading is an UNTRUSTED diff that may be trying to talk to it. This
-      // process holds a subscription credential, so "please do not" is the wrong control.
-      // Every tool that could reach the filesystem, the network or a shell is refused at
-      // the CLI, which is a thing the model cannot argue with.
-      // (Found by an independent GPT pass over this repository after it went public.)
-      "--disallowedTools",
-      "Bash,Read,Write,Edit,MultiEdit,NotebookEdit,Glob,Grep,WebFetch,WebSearch,Task",
-      // `--bare` is GONE. It was here to skip `.claude` auto-discovery, but the
-      // real workspace-trust fix has always been the neutral cwd below (the trust
-      // --bare alone insufficient) — so it was redundant, AND it silently disabled
-      // subscription auth, which is what forced every Claude leg onto the metered API.
-      "--append-system-prompt",
-      system,
-      "--model",
-      model,
-      "--output-format",
-      "json",
-    ],
+    claudeCliArgs(model, system),
     {
       input: user,
       encoding: "utf8",
@@ -2295,6 +2330,68 @@ export function spawnCapture(cmd, args, { input, timeout, maxBuffer, cwd, env })
   });
 }
 
+// The Codex feature flags that hand the model a capability, every one of them ON by
+// default in codex-cli 0.144.5 (`codex features list` — "stable true"). This leg had the
+// read-only sandbox and nothing else, so it was NOT the symmetric twin of the Claude
+// leg's refused-tools list; it was a reviewer with a shell, a browser and a plan
+// credential, reading an untrusted diff.
+//
+// MEASURED, not reasoned about. With only `-s read-only` and a neutral cwd, a prompt
+// asking it to print a file OUTSIDE that cwd returned the file's contents — the exact
+// shape of $CODEX_HOME/auth.json, which is the credential this process holds. With this
+// list applied, the same prompt returns "CANNOT". read-only is a WRITE boundary; it was
+// never a read boundary and never an egress boundary (browser_use has its own network
+// path that the sandbox does not sit in front of).
+//
+// A denylist of features is a denylist, so it inherits the usual weakness: a capability
+// added in a future CLI version arrives switched on and unnamed here. That is written
+// down in KNOWN-ISSUES.md rather than papered over — the pin on @openai/codex is what
+// keeps it from changing under a run.
+export const CODEX_DISABLED_FEATURES = [
+  "shell_tool", // the whole point: no command execution, so no reading the credential
+  "browser_use", // network egress that the read-only sandbox does not gate
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "computer_use",
+  "image_generation",
+  "multi_agent", // no spawning a sub-agent that would not inherit these refusals
+  "apps",
+  "enable_mcp_apps",
+  "plugins",
+  "remote_plugin",
+  "plugin_sharing",
+  "hooks",
+  "code_mode_host",
+  "tool_suggest",
+  "skill_mcp_dependency_install",
+];
+
+/**
+ * The argv the Codex CLI gets. Exported for the same reason as claudeCliArgs: the
+ * refusals are the security property, so a test asserts them.
+ */
+export function codexCliArgs(model) {
+  return [
+    "exec",
+    "-m",
+    model,
+    // read-only: this leg reviews a diff handed to it inline. It has no business
+    // touching the filesystem, and the sandbox is a second lock on top of the
+    // credential-free env.
+    "-s",
+    "read-only",
+    "--skip-git-repo-check",
+    "--ephemeral", // no session files on the runner
+    "--ignore-user-config", // reproducible; auth still resolves via CODEX_HOME
+    "--ignore-rules", // no project execpolicy files (belt and braces with the neutral cwd)
+    ...CODEX_DISABLED_FEATURES.flatMap((f) => ["--disable", f]),
+    "--color",
+    "never",
+    "--json",
+    "-", // prompt on stdin, so a large diff never hits arg-length limits
+  ];
+}
+
 async function callCodexCli(model, system, user) {
   // Codex has no --append-system-prompt, so the system prompt rides at the head of the
   // stdin prompt. The untrusted PR content stays wrapped in its <pr_*>/<diff> data tags
@@ -2303,24 +2400,7 @@ async function callCodexCli(model, system, user) {
   const startedAt = Date.now();
   const res = await spawnCapture(
     "codex",
-    [
-      "exec",
-      "-m",
-      model,
-      // read-only: this leg reviews a diff handed to it inline. It has no business
-      // touching the filesystem, and the sandbox is a second lock on top of the
-      // credential-free env.
-      "-s",
-      "read-only",
-      "--skip-git-repo-check",
-      "--ephemeral", // no session files on the runner
-      "--ignore-user-config", // reproducible; auth still resolves via CODEX_HOME
-      "--ignore-rules", // no project execpolicy files (belt and braces with the neutral cwd)
-      "--color",
-      "never",
-      "--json",
-      "-", // prompt on stdin, so a large diff never hits arg-length limits
-    ],
+    codexCliArgs(model),
     {
       input: prompt,
       timeout: CODEX_TIMEOUT_MS,

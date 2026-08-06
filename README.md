@@ -15,11 +15,13 @@ git clone https://github.com/ViktoriousLLC/tribunal-review && cd tribunal-review
 node bin/tribunal.mjs init
 ```
 
-Four questions about what access you have. It never asks for a secret's value. It writes your workflow and prints the exact `gh secret set` commands for the answers you gave. Then point your workflow at this repository, which it will also tell you to do if you forget:
+Four questions about what access you have. It never asks for a secret's value. It writes your workflow and prints the exact `gh secret set` commands for the answers you gave. Then point your workflow at this repository, pinned to a commit — run this from inside the clone you just made:
 
 ```
-gh variable set TRIBUNAL_PACKAGE --body 'github:ViktoriousLLC/tribunal-review#main'
+gh variable set TRIBUNAL_PACKAGE --body "github:ViktoriousLLC/tribunal-review#$(git rev-parse HEAD)" --repo OWNER/REPO
 ```
+
+A branch name would work and is not what you want here. This is the thing that reads your code and decides what you merge; it should not change because someone pushed to `main` this morning. Pin it, and upgrade at a moment you chose by re-running that command.
 
 ```
 node bin/tribunal.mjs doctor --repo
@@ -67,6 +69,13 @@ Node 20 or newer, the GitHub CLI, and a GitHub repository with Actions on. No ru
 - **Advisory.** A dispatched run cannot be a required status check, so it never blocks a merge.
 - **Large diffs are truncated**, and the comment says so. An empty finding list on a huge diff means less than it looks like.
 - **Subscription credentials expire** (roughly weekly for Codex). When one does, that leg fails loudly in the comment with the refresh command. It never falls back to a credit card.
+
+## What is not tested
+
+[KNOWN-ISSUES.md](KNOWN-ISSUES.md) names the paths that have never run end to end, the
+boundaries that are enforced by a denylist, and the platforms nobody has tried. It is
+written on the same principle as the cost reporting: an unmeasured thing is reported as
+unmeasured, not as fine.
 
 ## Support
 

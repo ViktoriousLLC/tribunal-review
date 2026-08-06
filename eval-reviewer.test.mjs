@@ -36,7 +36,10 @@ import {
   buildCoordinatorUserMessage,
   runFable,
   claudeCliEnv,
+  claudeCliArgs,
   codexCliEnv,
+  codexCliArgs,
+  CODEX_DISABLED_FEATURES,
   parseCodexJsonl,
   gptLegLabel,
   geminiLegLabel,
@@ -1198,7 +1201,11 @@ test("the GPT leg's DEFAULT path is the Codex plan, and its spawn passes an expl
   const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
   const call = src.slice(src.indexOf("async function callCodexCli"), src.indexOf("async function runCodex"));
   assert.match(call, /env: codexCliEnv\(process\.env\)/, "the spawn must pass an explicit minimal env, never inherit");
-  assert.match(call, /"-s",\s*\n?\s*"read-only"/, "the reviewer leg has no business writing to the runner");
+  const codexArgs = codexCliArgs("gpt-5.6-sol");
+  assert.ok(
+    codexArgs.includes("-s") && codexArgs[codexArgs.indexOf("-s") + 1] === "read-only",
+    "the reviewer leg has no business writing to the runner"
+  );
   // The panel's GPT slot must be filled by the plan path; no API fallback exists.
   const mainBody = src.slice(src.indexOf("const [claudePair, openaiLeg, geminiLeg]"));
   assert.match(mainBody, /runCodex\(system, user\)/);
@@ -1422,11 +1429,74 @@ test("--bare is GONE from the CLI invocation (it disables subscription auth)", (
   const src = readFileSync(new URL("./eval-reviewer.mjs", import.meta.url), "utf8");
   const call = src.slice(src.indexOf("async function callClaudeCli"), src.indexOf("async function runClaude"));
   assert.equal(
-    /"--bare"/.test(call),
+    claudeCliArgs("claude-opus-5", "sys").includes("--bare"),
     false,
     "--bare skips OAuth entirely, so the CLI can only auth with the METERED API key"
   );
   assert.match(call, /env: claudeCliEnv()/, "the spawn must pass an explicit minimal env, never inherit");
+});
+
+// ── Both reviewer legs are tool-refused, and SYMMETRICALLY so ────────────────────
+//
+// The asymmetry these pin was real and it was the highest-severity finding of the last
+// panel: the Claude leg had every filesystem/network/shell tool refused at the CLI while
+// the Codex leg had a read-only sandbox and nothing else. Measured against codex-cli
+// 0.144.5: with only `-s read-only`, a prompt asking the model to print a file outside
+// its working directory returned that file's contents. read-only is a WRITE boundary.
+test("the Claude leg refuses every tool that could reach a shell, a file, the network or another agent", () => {
+  const args = claudeCliArgs("claude-opus-5", "SYSTEM PROMPT");
+  const denied = args[args.indexOf("--disallowedTools") + 1].split(",");
+  for (const t of ["Bash", "BashOutput", "KillShell", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "Task", "Agent", "SlashCommand", "Skill"]) {
+    assert.ok(denied.includes(t), `${t} must be refused at the CLI, not asked for in a prompt`);
+  }
+  // The denylist covers BUILT-IN tools only. A user-level MCP server, hook, skill or
+  // plugin is a tool set the list has never heard of, and HOME is forwarded to this
+  // process — so on a developer machine that set is not empty. Load none of it.
+  assert.ok(args.includes("--strict-mcp-config"), "no MCP server from any ambient configuration");
+  const srcIdx = args.indexOf("--setting-sources");
+  assert.ok(srcIdx > -1 && args[srcIdx + 1] === "", "no user/project/local settings, hooks, skills or plugins");
+  // The system prompt must still arrive, or the refusals would be pinning a broken leg.
+  assert.equal(args[args.indexOf("--append-system-prompt") + 1], "SYSTEM PROMPT");
+  assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5");
+});
+
+test("the Codex leg is refused the same capabilities, not merely sandboxed read-only", () => {
+  const args = codexCliArgs("gpt-5.6-sol");
+  const disabled = args.map((a, i) => (args[i - 1] === "--disable" ? a : null)).filter(Boolean);
+  // shell_tool is the one that mattered: with it on, the model can `cat` the plan
+  // credential this very process is holding in $CODEX_HOME/auth.json.
+  assert.ok(disabled.includes("shell_tool"), "no command execution from a leg reading an untrusted diff");
+  // browser_use is network egress with its own path; the read-only sandbox does not gate it.
+  for (const f of ["browser_use", "browser_use_external", "browser_use_full_cdp_access", "computer_use"]) {
+    assert.ok(disabled.includes(f), `${f} is egress or control the sandbox does not cover`);
+  }
+  // A sub-agent would not inherit these flags, so the spawner is off too.
+  assert.ok(disabled.includes("multi_agent"), "no sub-agent that escapes this argv");
+  for (const f of ["apps", "enable_mcp_apps", "plugins", "remote_plugin", "plugin_sharing", "hooks", "code_mode_host"]) {
+    assert.ok(disabled.includes(f), `${f} can introduce tools this list never named`);
+  }
+  assert.equal(disabled.length, CODEX_DISABLED_FEATURES.length, "every named feature must reach the argv exactly once");
+  assert.ok(args.includes("--ignore-user-config") && args.includes("--ignore-rules"), "ambient config stays out");
+  assert.equal(args[args.length - 1], "-", "the prompt still rides on stdin");
+});
+
+test("neither leg's refusal list is a subset of the other's blind spot", () => {
+  // Not a naming comparison — the two CLIs name nothing the same way. This asserts that
+  // the four capability CLASSES are closed on BOTH legs, which is the property that was
+  // false before. A future contributor adding a capability to one leg has to answer for
+  // the other.
+  const claudeDenied = claudeCliArgs("m", "s")[claudeCliArgs("m", "s").indexOf("--disallowedTools") + 1].split(",");
+  const codexDisabled = new Set(CODEX_DISABLED_FEATURES);
+  const classes = [
+    ["shell", () => claudeDenied.includes("Bash"), () => codexDisabled.has("shell_tool")],
+    ["filesystem", () => claudeDenied.includes("Read"), () => codexDisabled.has("shell_tool")],
+    ["network", () => claudeDenied.includes("WebFetch") && claudeDenied.includes("WebSearch"), () => codexDisabled.has("browser_use")],
+    ["sub-agents", () => claudeDenied.includes("Task"), () => codexDisabled.has("multi_agent")],
+  ];
+  for (const [name, claudeClosed, codexClosed] of classes) {
+    assert.ok(claudeClosed(), `the Claude leg leaves ${name} open`);
+    assert.ok(codexClosed(), `the Codex leg leaves ${name} open`);
+  }
 });
 
 test("Claude-family metered API paths are deleted", () => {
