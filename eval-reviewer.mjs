@@ -953,7 +953,11 @@ export function buildDataRecord(clusters, legs, totalCost, billingStates = null,
       out: l.usage?.output ?? 0,
       usd: Number((l.costUsd || 0).toFixed(6)),
       attempts: l.attempts,
-      error: l.ok ? undefined : String(l.error || "").slice(0, 200),
+      // REDACTED, not merely truncated. The rendered comment runs leg errors through
+      // sanitiseReason; this field is the same string, base64-encoded into the SAME public
+      // comment and decodable by anyone, and it was only length-capped. A 200-character
+      // slice is a bound, not a redaction. (Frozen-artifact panel catch.)
+      error: l.ok ? undefined : sanitiseReason(l.error, 200),
     };
   }
     // The durable record carries the BILLING VERDICT, not just a `usd` number.

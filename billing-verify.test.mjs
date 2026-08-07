@@ -409,3 +409,21 @@ test("a newline in a vendor error cannot open a workflow command from the plain 
   const forged = lines.filter((l) => l.split("\n").some((seg, i) => i > 0 && seg.startsWith("::")));
   assert.deepEqual(forged, [], "no emitted line may contain a newline followed by a workflow command");
 });
+
+test("classifyModelRow accepts Anthropic's undashed date suffix, not only OpenAI's shapes", () => {
+  // The suffix test allowed `-2026-01-31` and `-0613` and nothing else, while MODEL_RATES
+  // already carried `claude-haiku-4-5-20251001` — the undashed 8-digit form. A row in that
+  // shape prefix-matched, failed the suffix test, and returned "ambiguous", which
+  // meteredOutputTokens turns into unmeasurable for the WHOLE read. The verdict then says
+  // "unverified" forever, which suppresses exactly the BILLED alarm this module exists to
+  // raise. Fails safe, and a permanently silent control is still a broken one.
+  const models = ["claude-opus-5", "gpt-5.6-sol"];
+  assert.equal(classifyModelRow("claude-opus-5-20260101", models), "ours");
+  assert.equal(classifyModelRow("claude-opus-5-2026-01-31", models), "ours");
+  assert.equal(classifyModelRow("gpt-5.6-sol-0613", models), "ours");
+  assert.equal(classifyModelRow("claude-opus-5", models), "ours");
+  // Still ambiguous, and must stay so: a suffix that is not a date is a different model.
+  assert.equal(classifyModelRow("claude-opus-5-turbo", models), "ambiguous");
+  assert.equal(classifyModelRow("claude-opus-5-202601", models), "ambiguous");
+  assert.equal(classifyModelRow("claude-sonnet-4-6", models), "other");
+});

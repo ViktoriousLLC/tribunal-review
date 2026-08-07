@@ -56,6 +56,21 @@ first scheduled run's own score and close the gap; a gate pinned at zero toleran
 number its own environment has never produced cries wolf, which is the failure this package
 spends its comments arguing against.
 
+## Known and not yet fixed
+
+**The two Claude legs block the event loop.** `callClaudeCli` uses `spawnSync` while
+`main()` fans the four legs out with `Promise.all`. The async `spawnCapture` helper exists
+precisely because a synchronous multi-minute child stops the other legs' timers — its own
+docstring says so — and the Claude legs do not use it. Consequences: the Codex hard timeout
+is not hard, a Gemini retry backoff can be starved past its deadline, and the panel is
+closer to serial than parallel. It has not been noticed because a serial panel looks exactly
+like a slow one. Found by a full-panel read of this package, agreed by two models.
+
+**`init` never prints the `TRIBUNAL_PACKAGE` command.** The workflow defaults to
+`tribunal-review@0.1.0`, which is not published, so a user who follows `tribunal init`
+exactly reproduces the documented `npm error 404` on their first dispatch. The command is in
+the README and not in `init`'s output, which is the wrong way round.
+
 ## Not tested on
 
 - **Anything but `ubuntu-latest`.** Windows and macOS runners, self-hosted runners, and

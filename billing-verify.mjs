@@ -86,8 +86,13 @@ export function classifyModelRow(reported, models) {
     if (reported === m) return "ours";
     if (!reported.startsWith(m)) continue;
     sawPrefix = true;
-    // `-2026-01-31`, and the legacy four-digit `-0613` form OpenAI still has rows for.
-    if (/^-(\d{4}-\d{2}-\d{2}|\d{4})$/.test(reported.slice(m.length))) return "ours";
+    // `-2026-01-31`, Anthropic's UNDASHED `-20251001` (which `claude-haiku-4-5-20251001`
+    // in MODEL_RATES is already an instance of, so this was rejecting a live id shape), and
+    // the legacy four-digit `-0613` form OpenAI still has rows for. Getting this wrong
+    // fails SAFE — an unrecognised suffix reads as ambiguous, which renders "unverified"
+    // rather than "free" — but a control that is permanently silent is not a control.
+    // (Frozen-artifact panel catch.)
+    if (/^-(\d{4}-\d{2}-\d{2}|\d{8}|\d{4})$/.test(reported.slice(m.length))) return "ours";
   }
   return sawPrefix ? "ambiguous" : "other";
 }
