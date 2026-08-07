@@ -1,7 +1,25 @@
 import { appendFileSync } from "node:fs";
 import { isDirectInvocation, reportMisidentifiedEntrypoint } from "./entrypoint.mjs";
 import { pathToFileURL } from "node:url";
-import { extractEvalData, isOurEvalComment } from "./eval-reviewer.mjs";
+import { extractEvalData, isOurEvalComment, PANEL_LEG_KEYS } from "./eval-reviewer.mjs";
+
+// A recorded review only counts as "this commit has been reviewed" if EVERY leg in it
+// succeeded. The only thing this dedup may ever refuse is a second IDENTICAL review of
+// IDENTICAL code by a FULLY WORKING panel. A run where a leg was skipped or errored — a
+// rotated credential, a rate limit, a dropped call — reviewed that commit with fewer eyes
+// than it should have, so the next request must run it again rather than inherit a partial
+// verdict as if it were a clean one.
+//
+// EXPECTED keys, not present ones. Inspecting only what happens to be in the record let a
+// leg that never ran at all pass as a complete panel: three ok legs and no entry for the
+// fourth read as full strength. Cannot-tell is FALSE here — no perModel block, an empty
+// one, or a leg missing its flag all mean re-review.
+export function everyLegOk(data, expectedKeys = PANEL_LEG_KEYS) {
+  const perModel = data?.perModel;
+  if (!perModel || typeof perModel !== "object" || Array.isArray(perModel)) return false;
+  if (!Array.isArray(expectedKeys) || expectedKeys.length === 0) return false;
+  return expectedKeys.every((key) => perModel[key] && perModel[key].ok === true);
+}
 
 export function reviewedShaFromComments(comments) {
   if (!Array.isArray(comments)) return null;
@@ -11,6 +29,7 @@ export function reviewedShaFromComments(comments) {
       if (isOurEvalComment(comment)) latest = comment;
     }
     const data = latest ? extractEvalData(latest.body) : null;
+    if (!everyLegOk(data)) return null;
     const headSha = data?.head_sha;
     return typeof headSha === "string" && headSha.trim() ? headSha : null;
   } catch {

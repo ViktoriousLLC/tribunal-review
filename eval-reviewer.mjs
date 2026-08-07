@@ -308,6 +308,9 @@ export function gptLegLabel(apiModel) {
   return "GPT-" + rest;
 }
 const MODEL_LABELS = { claude: "Claude", fable: "Fable", openai: gptLegLabel(CODEX_MODEL), gemini: "Gemini" };
+// The legs a COMPLETE panel has. eval-dedup asks for every one of them before it will
+// treat a recorded review as covering a commit.
+export const PANEL_LEG_KEYS = Object.keys(MODEL_LABELS);
 
 export function geminiLegLabel(apiModel) {
   const id = String(apiModel || "");
@@ -1489,11 +1492,37 @@ export function buildSystemPrompt(reviewerMd) {
   return [preamble, base, JSON_CONTRACT].filter(Boolean).join("\n\n");
 }
 
+// Strip AUTHORSHIP trailers from the pull request title and body before any reviewer sees
+// them. Not vanity: a footer saying an AI wrote the change is a signal about the author,
+// and this panel's whole claim is that each model reads the diff cold. A reviewer that can
+// tell who or what wrote something can score the author instead of the code, and the
+// blinded judge downstream inherits the bias.
+//
+// Trailers ONLY. Model names, vendor names and ticket numbers stay, because those are
+// routinely the subject matter the reviewer has to evaluate.
+export function stripAuthorshipSignals(text) {
+  if (text === undefined || text === null) return "";
+  return String(text)
+    .replace(/\r\n?/g, "\n")
+    .replace(/^[ \t]*co-authored-by:\s*.*(?:\n|$)/gim, "")
+    .replace(/^[ \t]*claude-session:\s*.*(?:\n|$)/gim, "")
+    // The FOOTER form only, not any sentence that happens to contain both phrases. An
+    // earlier version deleted a whole line whenever "generated with" and "claude code" both
+    // appeared on it, which ate real prose like "the report generated with Claude Code's
+    // help shows X". Eating a reviewer's input is the more expensive mistake, so the line
+    // must BE the footer: optional emoji, the phrase, the name bare or as a markdown link.
+    .replace(/^[ \t]*\W{0,4}\s*generated with \[?claude code\]?(?:\([^)]*\))?[ \t]*(?:\n|$)/gim, "")
+    .replace(/^https:\/\/claude\.ai\/code\/session_[^\s]+\s*(?:\n|$)/gim, "")
+    .replace(/\n[ \t]*(?:\n[ \t]*){2,}/g, "\n\n");
+}
+
 export function buildUserMessage(title, body, diff) {
   // Redact the FULL diff BEFORE truncating, so a secret straddling the
   // MAX_DIFF_CHARS boundary can't have its tail escape masking (eval panel catch).
   const redactedDiff = redactSensitive(diff);
   LAST_SENT_DIFF_CHARS = redactedDiff.length;
+  const neutralTitle = stripAuthorshipSignals(title);
+  const neutralBody = stripAuthorshipSignals(body);
   const clipped = redactedDiff.length > MAX_DIFF_CHARS;
   const shown = clipped ? redactedDiff.slice(0, MAX_DIFF_CHARS) : redactedDiff;
   // Wrap each author-controlled section in tags the system prompt designates as
@@ -1507,11 +1536,11 @@ export function buildUserMessage(title, body, diff) {
   // tools at the CLI rather than asking the model not to use them.
   return [
     "<pr_title>",
-    neutralizeTag(redactSensitive(title), "pr_title") || "(none)",
+    neutralizeTag(redactSensitive(neutralTitle), "pr_title") || "(none)",
     "</pr_title>",
     "",
     "<pr_description>",
-    body ? neutralizeTag(redactSensitive(body.slice(0, 4000)), "pr_description") : "(none)",
+    neutralBody ? neutralizeTag(redactSensitive(neutralBody.slice(0, 4000)), "pr_description") : "(none)",
     "</pr_description>",
     "",
     clipped ? `<diff truncated="${MAX_DIFF_CHARS} chars — note in your review if context is missing">` : "<diff>",
@@ -2483,17 +2512,51 @@ async function runCodex(system, user) {
   }
 }
 
+// The thinking control is PER MODEL, and every fact here was probed against the live API
+// rather than read out of documentation:
+//   - gemini 3.x (3.6-flash, 3.5-flash, 3.1-pro-preview) accept thinkingLevel low|medium|high
+//   - gemini-2.5-flash REJECTS it outright: 400 "Thinking level is not supported for this
+//     model", and that id is the LAST rung of the fallback ladder, so sending thinkingLevel
+//     to every model would kill the leg at exactly the moment the fallback exists for
+//   - sending BOTH budget and level is a 400 either way, so this returns exactly one
+//
+// This package's DEFAULT model is gemini-3.1-pro-preview and it was sending the older
+// budget parameter to it. "high" on the models that support it, because this leg's whole
+// job is finding defects.
+export function geminiThinkingConfig(model) {
+  const major = Number(/^gemini-(\d+)/.exec(String(model || ""))?.[1]);
+  return Number.isFinite(major) && major >= 3 ? { thinkingLevel: "high" } : { thinkingBudget: 6000 };
+}
+
+// The version rule above is an INFERENCE, correct for every model live today and not a
+// guarantee about the next one. Rather than let a future id take the leg down, recognise the
+// vendor's own rejection and retry once with the other control. Matched on the message
+// because the API returns a plain 400 for it.
+export function isThinkingLevelUnsupported(e) {
+  return /thinking level is not supported/i.test(String(e?.message || e));
+}
+
 export async function callGeminiModel(ai, model, system, user) {
-  const r = await ai.models.generateContent({
-    model,
-    contents: [{ role: "user", parts: [{ text: user }] }],
-    config: {
-      systemInstruction: system,
-      maxOutputTokens: 16000,
-      thinkingConfig: { thinkingBudget: 6000 }, // cap reasoning so it can't eat the whole budget → MAX_TOKENS
-      responseMimeType: "application/json",
-    },
-  });
+  const call = (thinkingConfig) =>
+    ai.models.generateContent({
+      model,
+      contents: [{ role: "user", parts: [{ text: user }] }],
+      config: {
+        systemInstruction: system,
+        maxOutputTokens: 16000,
+        thinkingConfig, // cap reasoning so it can't eat the whole budget → MAX_TOKENS
+        responseMimeType: "application/json",
+      },
+    });
+  const preferred = geminiThinkingConfig(model);
+  let r;
+  try {
+    r = await call(preferred);
+  } catch (e) {
+    if (!preferred.thinkingLevel || !isThinkingLevelUnsupported(e)) throw e;
+    console.warn(`  [!] ${model} rejected thinkingLevel; retrying once with a thinking budget.`);
+    r = await call({ thinkingBudget: 6000 });
+  }
   // Include thinking tokens (thoughtsTokenCount): they bill as output but are
   // reported separately from candidatesTokenCount, so the eval-log cost would
   // otherwise undercount Gemini spend (caught in review).

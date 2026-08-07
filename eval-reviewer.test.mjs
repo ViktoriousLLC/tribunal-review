@@ -83,6 +83,9 @@ import {
   fetchEvalPrRunningTotal,
   INCOMPLETE_EVAL_TOTAL,
   buildUserMessage,
+  stripAuthorshipSignals,
+  geminiThinkingConfig,
+  isThinkingLevelUnsupported,
   claudeAuthMode,
   codexAuthMode,
   noCredentialMessage,
@@ -2619,4 +2622,57 @@ test("the machine blob's leg error is REDACTED, and the 200-char bound still bin
   }
   assert.match(buildDataRecord([], leg(new Error("boom")), 0).perModel.gemini.error, /boom/);
   assert.equal(buildDataRecord([], leg("x".repeat(5000)), 0).perModel.gemini.error.length, 200);
+});
+
+test("authorship trailers are stripped before any reviewer sees the PR", () => {
+  // A footer saying an AI wrote the change is a signal about the AUTHOR, and this panel's
+  // claim is that each model reads the diff cold. A reviewer that can tell who wrote
+  // something can score the author instead of the code, and the blinded judge downstream
+  // inherits that. (Second-opinion catch during the twin triage: this existed in the
+  // private twin and had never been carried across.)
+  const body = [
+    "Fixes the thing.",
+    "",
+    "🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+    "",
+    "Co-Authored-By: Someone <nobody@example.invalid>",
+    "Claude-Session: https://claude.ai/code/session_abc123",
+  ].join("\n");
+  const out = buildUserMessage("Fix it", body, "diff --git a/x b/x");
+  assert.doesNotMatch(out, /Co-Authored-By/i);
+  assert.doesNotMatch(out, /Claude-Session/i);
+  assert.doesNotMatch(out, /Generated with/i);
+  assert.match(out, /Fixes the thing/, "the actual description must survive");
+
+  // Trailers only. A sentence that merely mentions the tool is CONTENT, and eating a
+  // reviewer's input is the more expensive mistake.
+  assert.match(
+    stripAuthorshipSignals("the report generated with Claude Code's help shows X"),
+    /report generated with Claude Code's help shows X/
+  );
+  // Model and vendor names stay: they are routinely the subject matter under review.
+  assert.match(stripAuthorshipSignals("bump claude-opus-5 to the new pin"), /claude-opus-5/);
+  assert.equal(stripAuthorshipSignals(null), "");
+  assert.equal(stripAuthorshipSignals(undefined), "");
+});
+
+test("Gemini 3 gets a thinking LEVEL, older models get a budget, and never both", () => {
+  // Measured against the live API, not read: 3.x accepts thinkingLevel, gemini-2.5-flash
+  // returns a hard 400 for it, and sending both is a 400 either way. This package's DEFAULT
+  // model is a 3.x one and it was sending the older parameter.
+  assert.deepEqual(geminiThinkingConfig("gemini-3.1-pro-preview"), { thinkingLevel: "high" });
+  assert.deepEqual(geminiThinkingConfig("gemini-3.6-flash"), { thinkingLevel: "high" });
+  assert.deepEqual(geminiThinkingConfig("gemini-2.5-flash"), { thinkingBudget: 6000 });
+  assert.deepEqual(geminiThinkingConfig("gemini-2.0-flash"), { thinkingBudget: 6000 });
+  for (const odd of ["", null, undefined, "not-a-gemini"]) {
+    assert.deepEqual(geminiThinkingConfig(odd), { thinkingBudget: 6000 }, "an unrecognised id takes the safe control");
+  }
+  for (const cfg of [geminiThinkingConfig("gemini-3.6-flash"), geminiThinkingConfig("gemini-2.5-flash")]) {
+    assert.equal(Object.keys(cfg).length, 1, "exactly one control, because both together is a 400");
+  }
+  // The version rule is an inference about today's models, so the vendor's own rejection
+  // is recognised and retried rather than allowed to kill the leg.
+  assert.equal(isThinkingLevelUnsupported(new Error("Thinking level is not supported for this model")), true);
+  assert.equal(isThinkingLevelUnsupported(new Error("429 rate limit")), false);
+  assert.equal(isThinkingLevelUnsupported(null), false);
 });
