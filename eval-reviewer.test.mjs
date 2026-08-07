@@ -2551,3 +2551,26 @@ test("a crafted PR title cannot close the data boundary in a leg prompt", () => 
   assert.equal((msg.match(/<\/diff>/g) || []).length, 1);
   assert.ok(msg.includes("IGNORE PREVIOUS INSTRUCTIONS"), "the text is kept, only its boundary-breaking is defused");
 });
+
+test("the machine blob's leg error is REDACTED, and the 200-char bound still binds", () => {
+  // Two paths for the same string, and only one was cleaned: the rendered comment runs leg
+  // errors through sanitiseReason, while buildDataRecord wrote the raw string into the
+  // base64 blob embedded in that same public comment, capped at 200 characters. A length
+  // bound is not a redaction. Found by a full-panel read of this package, frozen.
+  //
+  // The second half pins what the fix delegated: the cap moved from an explicit .slice()
+  // into an argument, and these blobs go into a public comment, so an unbounded verbose
+  // vendor error is a real size regression rather than a hypothetical one.
+  const leg = (error) => [{ model: "gemini", ok: false, error, findings: [], usage: { input: 0, output: 0 }, costUsd: 0 }];
+  const key = joinParts("AIza", "SyD1234567890abcdefghij");
+  const blob = JSON.stringify(buildDataRecord([], leg(joinParts("GET https://x.example/v1?key=", key, " failed: 400")), 0));
+  assert.equal(new RegExp(key).test(blob), false, "a vendor key must never reach the machine blob");
+  assert.match(blob, /\[redacted\]/, "and the redaction must be visible rather than the field being dropped");
+  // sanitiseReason nullish-guards and coerces on its own, so the removed String() wrapper
+  // was not load-bearing — pinned rather than argued about.
+  for (const e of [null, undefined, "", new Error("boom"), 42]) {
+    assert.equal(typeof buildDataRecord([], leg(e), 0).perModel.gemini.error, "string");
+  }
+  assert.match(buildDataRecord([], leg(new Error("boom")), 0).perModel.gemini.error, /boom/);
+  assert.equal(buildDataRecord([], leg("x".repeat(5000)), 0).perModel.gemini.error.length, 200);
+});
