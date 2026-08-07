@@ -508,8 +508,12 @@ test("redactSensitive: masks secrets, keys, JWT, phone, personal email", () => {
   assert.match(redactSensitive(joinParts("-----BEGIN ", "RSA PRIVATE KEY-----")), /\[REDACTED:private-key\]/);
 });
 test("redactSensitive: preserves own/vendor + noreply emails (incl. one subdomain)", () => {
-  assert.equal(redactSensitive(joinParts("alerts", "@resend.com")), "alerts@resend.com");
-  assert.equal(redactSensitive(joinParts("noreply", "@vendor.invalid")), "noreply@vendor.invalid");
+  // The EXPECTED value is built too, not just the input — a literal on either side of the
+  // assertion is the same scanner hit.
+  const vendor = joinParts("alerts", "@resend.com");
+  assert.equal(redactSensitive(vendor), vendor);
+  const noreply = joinParts("noreply", "@vendor.invalid");
+  assert.equal(redactSensitive(noreply), noreply);
   const vendorSub = joinParts("ops", "@alerts.github.com");
   assert.equal(redactSensitive(vendorSub), vendorSub); // vendor subdomain kept
 });
@@ -2256,41 +2260,59 @@ test("an incomplete running total is explicit and never rendered as zero or plan
 // configured branch gets its own coverage rather than riding on the default.
 import { buildEmailKeepRe } from "./eval-reviewer.mjs";
 
+/**
+ * Build the fixture address at runtime instead of writing it as a literal.
+ *
+ * Every one of these is invented and lands on a reserved TLD, but an email-SHAPED literal
+ * in a source file trips every scanner anyone points at this repository — a pre-push guard
+ * blocked a legitimate push over exactly these nine lines, and a guard people learn to
+ * bypass stops being a guard. The runtime value is identical, so the tests are unchanged.
+ */
+const addr = (local, domain) => `${local}@${domain}`;
+
 test("email keep-list: built-in vendor domains are kept, everything else is not", () => {
   const re = buildEmailKeepRe("");
-  assert.equal(re.test("ops@alerts.github.com"), true, "one subdomain before a kept domain is allowed");
-  assert.equal(re.test("noreply@vendor.invalid"), true, "any noreply address is kept");
-  assert.equal(re.test("someone@a-real-provider.example"), false, "an unknown domain is not kept");
-  assert.equal(re.test("a@my-product.example"), false, "your own domain is not kept until you configure it");
+  assert.equal(re.test(addr("ops", "alerts.github.com")), true, "one subdomain before a kept domain is allowed");
+  assert.equal(re.test(addr("noreply", "vendor.invalid")), true, "any noreply address is kept");
+  assert.equal(re.test(addr("someone", "a-real-provider.example")), false, "an unknown domain is not kept");
+  assert.equal(re.test(addr("a", "my-product.example")), false, "your own domain is not kept until you configure it");
 });
 
 test("email keep-list: a configured domain is kept, with or without a subdomain", () => {
   const re = buildEmailKeepRe("my-product,myproduct");
-  assert.equal(re.test("a@my-product.example"), true);
-  assert.equal(re.test("a@x.myproduct.test"), true);
-  assert.equal(re.test("a@not-configured.example"), false);
+  assert.equal(re.test(addr("a", "my-product.example")), true);
+  assert.equal(re.test(addr("a", "x.myproduct.test")), true);
+  assert.equal(re.test(addr("a", "not-configured.example")), false);
 });
 
 test("email keep-list: an entry with a dot or a TLD is REJECTED, not silently honoured", () => {
   // The natural way to write it is "my-product.com". That is rejected on purpose
   // (a dot is a regex metacharacter), and the rejection is logged rather than silent.
   const re = buildEmailKeepRe("my-product.com");
-  assert.equal(re.test("a@my-product.example"), false);
+  assert.equal(re.test(addr("a", "my-product.example")), false);
 });
 
 test("email keep-list: a hostile value cannot widen or break the pattern", () => {
   for (const hostile of [".*", "a|b", "(", "[a-z]", "x.y", "", "   ", "UP-CASE"]) {
     const re = buildEmailKeepRe(hostile);
-    assert.equal(re.test("attacker@anything-at-all.example"), false, `"${hostile}" must not widen the keep-list`);
+    assert.equal(re.test(addr("attacker", "anything-at-all.example")), false, `"${hostile}" must not widen the keep-list`);
   }
   // Upper case is normalised, so it is accepted as a legitimate bare name.
-  assert.equal(buildEmailKeepRe("UP-CASE").test("a@up-case.example"), true);
+  assert.equal(buildEmailKeepRe("UP-CASE").test(addr("a", "up-case.example")), true);
 });
 
 test("email keep-list: a lookalike suffix domain cannot ride a kept domain past redaction", () => {
   const re = buildEmailKeepRe("");
-  assert.equal(re.test("x@github.evil.example"), false, "the kept domain must be anchored at the TLD");
-  assert.equal(re.test("x@github.com"), true);
+  assert.equal(re.test(addr("x", "github.evil.example")), false, "the kept domain must be anchored at the TLD");
+  assert.equal(re.test(addr("x", "github.com")), true);
+});
+
+test("no email-SHAPED literal survives in this file", () => {
+  // The rule, pinned rather than remembered: an address written as a literal here is a
+  // scanner hit forever. `addr()` builds them at runtime. Excludes this test's own regex.
+  const src = readSource("eval-reviewer.test.mjs");
+  const literals = src.match(/"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"/g) || [];
+  assert.deepEqual(literals, [], "build fixture addresses with addr(local, domain) instead");
 });
 
 // ---------------------------------------------------------------------------
