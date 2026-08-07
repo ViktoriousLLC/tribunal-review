@@ -1983,22 +1983,29 @@ export function claudeCliArgs(model, system) {
   ];
 }
 
+// ASYNC, and it took a full-panel read of this package to notice it was not.
+//
+// This used to be `spawnSync`. main() fans the four legs out with `Promise.all`, and
+// spawnCapture's own docstring below explains why the Codex leg is forbidden from being
+// synchronous: a blocking multi-minute child FREEZES THE EVENT LOOP for its whole
+// duration, so nothing else in the fan-out can make progress. Every word of that applied
+// here too, with a longer combined budget across two Claude legs, and the code did the
+// thing the comment forbids. Three consequences, none of which look like a bug from
+// outside:
+//   - the Codex leg's hard timeout is a setTimeout, and it cannot fire, so it is not hard
+//   - Gemini's retry backoffs are sleeps, and they cannot fire, so a retry can be starved
+//     past its own deadline and present as a failed leg
+//   - the panel is nearer serial than parallel, and a serial panel looks exactly like a
+//     slow one, which is why nobody noticed
 async function callClaudeCli(model, system, user) {
-  const { spawnSync } = await import("node:child_process");
   const startedAt = Date.now();
-  const res = spawnSync(
-    "claude",
-    claudeCliArgs(model, system),
-    {
-      input: user,
-      encoding: "utf8",
-      timeout: CLAUDE_TIMEOUT_MS,
-      maxBuffer: 16 * 1024 * 1024,
-      shell: false,
-      cwd: claudeNeutralCwd(),
-      env: claudeCliEnv(process.env),
-    }
-  );
+  const res = await spawnCapture("claude", claudeCliArgs(model, system), {
+    input: user,
+    timeout: CLAUDE_TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024,
+    cwd: claudeNeutralCwd(),
+    env: claudeCliEnv(process.env),
+  });
   // Log the duration EVERY run, exactly as the codex leg does. Without it there was no
   // way to tell a leg that hung on the trust gate from one that simply needed longer than
   // its budget, and both present as status 143. The codex leg has printed its duration
@@ -2009,23 +2016,24 @@ async function callClaudeCli(model, system, user) {
   // Say WHAT killed it. This is the defect behind every "claude CLI failed (status 143):"
   // with nothing after the colon: a timeout kill leaves stderr empty, so the message
   // carried a number and no cause, and the panel then reported "why is not determined
-  // from the error alone". 143 is SIGTERM, which is OUR OWN timeout, not the plan and not
-  // a credential. The codex leg has always checked `timedOut` first; this one never did.
-  // MEASURED, because the first version of this asserted something it could not know.
-  // `spawnSync` has NO `timedOut` field - that belongs to the async spawnCapture helper
-  // the codex leg uses, and copying the field name across meant the check was dead code.
-  // On a real timeout spawnSync returns `status: null`, `signal: "SIGTERM"`, and
-  // `error.code: "ETIMEDOUT"`. Only the last of those is decisive: a bare SIGTERM is also
-  // what an external kill looks like (job cancellation, the runner reclaiming memory), so
-  // claiming "our timeout" from the signal alone would be a confident wrong answer of
-  // exactly the kind this whole change exists to stop producing.
-  const ourTimeout = res?.error?.code === "ETIMEDOUT";
-  const killed = ourTimeout || res?.signal === "SIGTERM" || res?.status === 143;
+  // from the error alone". 143 is SIGTERM, which on its own is ambiguous: it is what OUR
+  // OWN timeout used to look like AND what an external kill looks like (a cancelled job,
+  // the runner reclaiming memory). Claiming "our timeout" from the signal alone would be a
+  // confident wrong answer of exactly the kind this reporting exists to stop producing.
+  //
+  // The DECISIVE signal moved with the spawn helper and is now `timedOut`, which
+  // spawnCapture sets only from its own timer. Under spawnSync it was
+  // `error.code === "ETIMEDOUT"`, and a `res.timedOut` check back then was dead code
+  // because spawnSync has no such field — so this is the same invariant re-anchored, not a
+  // relaxation. Everything below it is unchanged: a kill we did not order still reports
+  // itself as external rather than borrowing our timeout's explanation.
+  const ourTimeout = res?.timedOut === true;
+  const killed = ourTimeout || res?.signal === "SIGTERM" || res?.signal === "SIGKILL" || res?.status === 143;
   if (killed) {
     const budgetS = Math.round(CLAUDE_TIMEOUT_MS / 1000);
     throw new Error(
       ourTimeout
-        ? `claude CLI was killed by OUR OWN ${budgetS}s timeout after ${durationS}s (ETIMEDOUT). `
+        ? `claude CLI was killed by OUR OWN ${budgetS}s timeout after ${durationS}s. `
           + `NOT a usage limit and NOT a credential problem. Either the run needed longer than `
           + `the budget, or the workspace-trust gate hung.`
         : `claude CLI was killed after ${durationS}s of a ${budgetS}s budget `
@@ -2288,7 +2296,7 @@ export function spawnCapture(cmd, args, { input, timeout, maxBuffer, cwd, env })
     try {
       child = spawnProcess(cmd, args, { cwd, env, shell: false });
     } catch (e) {
-      resolve({ status: null, stdout: "", stderr: String(e?.message || e), timedOut: false });
+      resolve({ status: null, signal: null, stdout: "", stderr: String(e?.message || e), timedOut: false });
       return;
     }
     let stdout = "";
@@ -2315,7 +2323,7 @@ export function spawnCapture(cmd, args, { input, timeout, maxBuffer, cwd, env })
       } catch {
         /* already gone */
       }
-      settle({ status: null, stdout, stderr, timedOut: true });
+      settle({ status: null, signal: "SIGKILL", stdout, stderr, timedOut: true });
     }, timeout);
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -2332,11 +2340,16 @@ export function spawnCapture(cmd, args, { input, timeout, maxBuffer, cwd, env })
       stderr = (stderr + d).slice(-8000);
     });
     child.on("error", (e) => {
-      settle({ status: null, stdout, stderr: String(e?.message || e), timedOut });
+      settle({ status: null, signal: null, stdout, stderr: String(e?.message || e), timedOut });
     });
-    child.on("close", (code) => {
-      if (over) console.warn(`  [!] codex stdout exceeded the buffer cap; dropped ${over} early chars.`);
-      settle({ status: timedOut ? null : code, stdout, stderr, timedOut });
+    // The SIGNAL is carried through, not dropped. Both callers need to tell OUR OWN timeout
+    // from a kill that came from somewhere else (a cancelled job, the runner reclaiming
+    // memory), and without the signal those two collapse into the same `status: null` and
+    // the run reports a confident wrong cause. That distinction cost a debugging session
+    // once already; it is not being re-lost to a swapped spawn helper.
+    child.on("close", (code, signal) => {
+      if (over) console.warn(`  [!] ${cmd} stdout exceeded the buffer cap; dropped ${over} early chars, so any whole-output parse of it will fail.`);
+      settle({ status: timedOut ? null : code, signal: signal ?? null, stdout, stderr, timedOut });
     });
     if (input != null) {
       child.stdin.on("error", () => {

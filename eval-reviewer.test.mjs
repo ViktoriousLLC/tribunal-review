@@ -1186,13 +1186,19 @@ test("a killed Claude leg says it was killed, and its budget is measured not gue
   const call = src.slice(src.indexOf("async function callClaudeCli"), src.indexOf("async function runClaude"));
   assert.match(call, /timeout: CLAUDE_TIMEOUT_MS/, "the spawn must use the constant, not a literal");
   assert.match(call, /claude leg \(\$\{model\}\) duration/, "every run must log its duration like the codex leg");
-  // The whole point: 143 is SIGTERM from OUR timeout. Reporting it as a bare status left
-  // the panel saying "why is not determined from the error alone".
-  // spawnSync has no timedOut field and returns status null on timeout; ETIMEDOUT is
-  // the only decisive signal, and a bare SIGTERM must NOT be claimed as our timeout.
-  assert.match(call, /res\?\.error\?\.code === "ETIMEDOUT"/, "the decisive check must be ETIMEDOUT");
+  // The whole point: a bare SIGTERM is ambiguous. It is what our own timeout looks like
+  // AND what an external kill looks like, so the decisive signal must be one only WE can
+  // set. Under spawnSync that was `error.code === "ETIMEDOUT"`; under spawnCapture it is
+  // `timedOut`, which its own timer sets and nothing else does. Same invariant, re-anchored
+  // when the leg went async — and the OLD anchor must be gone, or a future reader will
+  // think it is still load-bearing.
+  assert.match(call, /res\?\.timedOut === true/, "the decisive check must be the flag only our own timer sets");
+  // The CODE shape, not the word: the comment above it still explains the history, and
+  // deleting that history is how the next person re-derives the wrong anchor.
+  assert.doesNotMatch(call, /res\?\.error\?\.code/, "spawnCapture never sets error.code; that check would be dead code now");
+  assert.doesNotMatch(call, /spawnSync\(|\{ spawnSync \}/, "the Claude leg must not block the fan-out it runs inside");
+  assert.match(call, /await spawnCapture\("claude"/, "it goes through the async helper, like the codex leg");
   assert.match(call, /WITHOUT our own/, "an external kill must be reported as external, not as our timeout");
-  assert.doesNotMatch(call, /res\?\.timedOut/, "spawnSync has no timedOut field; that check was dead code");
   assert.match(call, /killed by OUR OWN/, "the message must name the cause, not just a number");
   assert.match(call, /NOT a usage limit and NOT a credential problem/);
   assert.match(call, /no stderr was produced/, "an empty stderr must not render as a bare colon");
@@ -1596,6 +1602,46 @@ test("spawnCapture kills a hung child at the timeout and says so", async () => {
   });
   assert.equal(r.timedOut, true, "a hung Codex run must not hold the review open indefinitely");
   assert.equal(r.status, null);
+  assert.equal(r.signal, "SIGKILL", "the signal is carried through, so a caller can tell our kill from somebody else's");
+});
+
+test("spawnCapture leaves the event loop free, which is the whole reason the legs use it", async () => {
+  // THE REGRESSION THIS PINS. The Claude legs used spawnSync inside the same Promise.all
+  // as Codex and Gemini. A blocking child freezes the loop, so the Codex hard timeout (a
+  // setTimeout) cannot fire and Gemini's retry backoffs (sleeps) cannot fire. The panel
+  // was nearer serial than parallel, and a serial panel looks exactly like a slow one,
+  // which is why it survived four review rounds.
+  //
+  // Measured rather than asserted: count timer ticks while a real child runs.
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 20);
+  try {
+    await spawnCapture(process.execPath, ["-e", "setTimeout(() => process.exit(0), 600)"], {
+      timeout: 20000,
+      maxBuffer: 1024,
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH },
+    });
+  } finally {
+    clearInterval(timer);
+  }
+  assert.ok(ticks > 5, `timers must keep firing while a child runs; got ${ticks} ticks`);
+});
+
+test("two spawnCaptures in Promise.all take about as long as the slower one, not both", async () => {
+  // The property the fan-out claims and spawnSync quietly took away. Generous bounds: this
+  // is asserting concurrency, not benchmarking a machine.
+  const child = (ms) =>
+    spawnCapture(process.execPath, ["-e", `setTimeout(() => process.exit(0), ${ms})`], {
+      timeout: 20000,
+      maxBuffer: 1024,
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH },
+    });
+  const startedAt = Date.now();
+  await Promise.all([child(700), child(700)]);
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 1300, `two 700ms children run concurrently should finish well under 1400ms; took ${elapsed}ms`);
 });
 
 test("the OpenAI invoice check watches the only callable GPT model", () => {
