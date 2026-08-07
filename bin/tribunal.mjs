@@ -8,7 +8,7 @@
 //
 // No dependencies. No network. Nothing here ever prints a secret's value.
 
-import { mkdirSync, existsSync, copyFileSync } from "node:fs";
+import { mkdirSync, existsSync, copyFileSync, readFileSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -16,6 +16,16 @@ import { isDirectInvocation, reportMisidentifiedEntrypoint } from "../entrypoint
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CWD = process.cwd();
+// Read from package.json rather than typed here, so a fork that renames the repository
+// prints its own name instead of confidently sending its users to somebody else's.
+const PACKAGE_REPO = (() => {
+  try {
+    const url = JSON.parse(readFileSync(path.join(PKG_ROOT, "package.json"), "utf8"))?.repository?.url || "";
+    return url.replace(/^git\+/, "").replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "") || "OWNER/REPO";
+  } catch {
+    return "OWNER/REPO";
+  }
+})();
 
 // Every credential the panel understands. `unlocks` is what you lose without it.
 const CREDENTIALS = [
@@ -402,6 +412,16 @@ async function init() {
     console.log("own token counts. It is not checked against the provider's invoice, so treat it");
     console.log("as close rather than exact. The provider's dashboard is the number that counts.");
   }
+  // POINT THE WORKFLOW AT THIS PACKAGE, and say so here rather than only in the README.
+  // The workflow defaults to the npm release, which is not published, so a user who
+  // follows init exactly hits `npm error 404 tribunal-review@0.1.0 is not in this registry`
+  // on their very first dispatch. The workflow's own comment records that this already
+  // happened once. A setup command that leaves out the step its own error message tells
+  // you to run is the wrong way round.
+  console.log("\nPoint the workflow at this package. Run this from inside your clone of");
+  console.log("tribunal-review, and pin a COMMIT rather than a branch, because this is the thing");
+  console.log("that reads your code and decides what you merge:\n");
+  console.log(`  gh variable set TRIBUNAL_PACKAGE --body "github:${PACKAGE_REPO}#$(git rev-parse HEAD)" --repo OWNER/REPO`);
   console.log("\nThen open a pull request and run:  gh workflow run tribunal.yml -f pr_number=<n>\n");
   return 0;
 }

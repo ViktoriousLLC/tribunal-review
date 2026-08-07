@@ -7,6 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { secretCommands } from "./bin/tribunal.mjs";
 
 const both = { claude: "plan", gpt: "plan", gemini: "none", billing: "yes" };
@@ -92,4 +93,20 @@ test("a mixed setup asks for exactly the credentials that setup uses", () => {
 test("no billed leg means no ALLOW_METERED line at all", () => {
   const { lines } = secretCommands({ claude: "plan", gpt: "plan", gemini: "none", billing: "no" });
   assert.ok(!lines.some((l) => l.includes("ALLOW_METERED")));
+});
+
+test("init tells you to point the workflow at this package, not just the README", () => {
+  // The workflow defaults to the npm release, which is not published, so a user who follows
+  // init exactly hits `npm error 404 tribunal-review@0.1.0 is not in this registry` on
+  // their first dispatch. The workflow's own comment records that this already happened.
+  // A setup command that omits the step its own error message tells you to run is the
+  // wrong way round. (Frozen-artifact panel catch.)
+  const src = readFileSync(new URL("./bin/tribunal.mjs", import.meta.url), "utf8");
+  const init = src.slice(src.indexOf("Now add the secrets"), src.indexOf("Then open a pull request"));
+  assert.match(init, /gh variable set TRIBUNAL_PACKAGE/, "init must print the variable command");
+  assert.match(init, /rev-parse HEAD/, "and pin a commit, because a branch moves under the thing that gates your merges");
+  // Derived from package.json, so a fork prints its own repository instead of confidently
+  // sending its users to this one.
+  assert.match(src, /const PACKAGE_REPO = /, "the repository name must come from package.json, not a literal");
+  assert.doesNotMatch(init, /github:ViktoriousLLC/, "no hardcoded owner in the printed command");
 });
