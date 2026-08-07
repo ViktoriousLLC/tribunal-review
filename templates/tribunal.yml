@@ -129,6 +129,24 @@ jobs:
       - name: Install Claude CLI (only when running Claude on the subscription)
         if: steps.dedup.outputs.skip != 'true' && (env.CLAUDE_CODE_OAUTH_TOKEN != '' || (env.ANTHROPIC_API_KEY != '' && env.ALLOW_METERED == 'true'))
         run: npm install -g @anthropic-ai/claude-code@2.1.220   # pinned for the same reason as everything else here
+      # The refusals the Claude legs run under are FLAGS, and a flag is a claim about a
+      # binary. Nothing else can see whether the pinned CLI still accepts them: the unit
+      # tests inspect the argv array this package builds, and the first evidence of a
+      # rejected flag would otherwise be a dispatched review reporting three lost legs.
+      # Ten seconds, at install time, loud.
+      - name: Check the pinned Claude CLI still accepts the refusal flags
+        if: steps.dedup.outputs.skip != 'true' && (env.CLAUDE_CODE_OAUTH_TOKEN != '' || (env.ANTHROPIC_API_KEY != '' && env.ALLOW_METERED == 'true'))
+        shell: bash
+        run: |
+          set -euo pipefail
+          help="$(claude --help 2>&1)"
+          for flag in --disallowedTools --strict-mcp-config --setting-sources; do
+            if ! grep -q -- "$flag" <<<"$help"; then
+              echo "::error title=Claude CLI flag missing::The pinned Claude CLI does not list $flag. The reviewer leg would spawn with a refusal it cannot enforce, or fail outright. Re-read CLAUDE_REFUSED_TOOLS against this version before bumping the pin."
+              exit 1
+            fi
+          done
+          echo "Claude CLI accepts every refusal flag the reviewer passes."
       # The GPT leg runs on the CODEX PLAN by default, and on the pay-per-call route only
       # for somebody who has no plan credential at all.
       #

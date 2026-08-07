@@ -1224,6 +1224,10 @@ test("the GPT leg's DEFAULT path is the Codex plan, and its spawn passes an expl
     codexArgs.includes("-s") && codexArgs[codexArgs.indexOf("-s") + 1] === "read-only",
     "the reviewer leg has no business writing to the runner"
   );
+  // KEEP THE COUPLING. Asserting the builder's output proves nothing about the spawn if
+  // somebody re-inlines a literal array at the call site: every refusal test would stay
+  // green while the real invocation lost its refusals.
+  assert.match(call, /codexCliArgs\(model\)/, "the spawn must build its argv with codexCliArgs, not a literal");
   // The panel's GPT slot must be filled by the plan path; no API fallback exists.
   const mainBody = src.slice(src.indexOf("const [claudePair, openaiLeg, geminiLeg]"));
   assert.match(mainBody, /runCodex\(system, user\)/);
@@ -1452,6 +1456,9 @@ test("--bare is GONE from the CLI invocation (it disables subscription auth)", (
     "--bare skips OAuth entirely, so the CLI can only auth with the METERED API key"
   );
   assert.match(call, /env: claudeCliEnv()/, "the spawn must pass an explicit minimal env, never inherit");
+  // Same coupling as the codex leg: the builder's output is only the real argv if the
+  // spawn actually calls the builder.
+  assert.match(call, /claudeCliArgs\(model, system\)/, "the spawn must build its argv with claudeCliArgs, not a literal");
 });
 
 // ── Both reviewer legs are tool-refused, and SYMMETRICALLY so ────────────────────
@@ -1493,7 +1500,12 @@ test("the Codex leg is refused the same capabilities, not merely sandboxed read-
   for (const f of ["apps", "enable_mcp_apps", "plugins", "remote_plugin", "plugin_sharing", "hooks", "code_mode_host"]) {
     assert.ok(disabled.includes(f), `${f} can introduce tools this list never named`);
   }
-  assert.equal(disabled.length, CODEX_DISABLED_FEATURES.length, "every named feature must reach the argv exactly once");
+  // UNIQUENESS, not length. `disabled` is built by flatMapping CODEX_DISABLED_FEATURES, so
+  // comparing its length to that list's holds by construction and a duplicated entry sails
+  // through — a decorative assertion in a package whose whole premise is that those are the
+  // problem.
+  assert.deepEqual(new Set(disabled), new Set(CODEX_DISABLED_FEATURES), "the argv must carry exactly the named features");
+  assert.equal(new Set(disabled).size, disabled.length, "no feature may be disabled twice");
   assert.ok(args.includes("--ignore-user-config") && args.includes("--ignore-rules"), "ambient config stays out");
   assert.equal(args[args.length - 1], "-", "the prompt still rides on stdin");
 });
@@ -1505,6 +1517,16 @@ test("neither leg's refusal list is a subset of the other's blind spot", () => {
   // the other.
   const claudeDenied = claudeCliArgs("m", "s")[claudeCliArgs("m", "s").indexOf("--disallowedTools") + 1].split(",");
   const codexDisabled = new Set(CODEX_DISABLED_FEATURES);
+  // NOTE THE COUPLING, because a test that hides it is worse than one that states it: on
+  // the pinned codex-cli the filesystem row below is closed BY the shell guard, since that
+  // CLI has no first-class file-read tool and the model reaches a file only by running a
+  // command. True today, and exactly what a pin bump can change. So the coupling is
+  // asserted rather than assumed, and this assertion is the pin-bump checklist item.
+  assert.equal(
+    CODEX_DISABLED_FEATURES.filter((f) => /read|file|fs_/.test(f)).length,
+    0,
+    "the pinned CLI names no file-read feature; if a bump adds one, disable it and give the filesystem row its own guard"
+  );
   const classes = [
     ["shell", () => claudeDenied.includes("Bash"), () => codexDisabled.has("shell_tool")],
     ["filesystem", () => claudeDenied.includes("Read"), () => codexDisabled.has("shell_tool")],

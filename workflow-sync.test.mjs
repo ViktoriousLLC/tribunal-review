@@ -42,14 +42,25 @@ test("the repository's own workflow is byte-identical to the shipped template", 
 function evalGate(expr, env) {
   const js = expr
     .replace(/steps\.dedup\.outputs\.skip\s*!=\s*'true'/g, "true")
+    // EMPTY STRING FIRST, and as a truthiness test rather than an equality one. GitHub
+    // resolves an ABSENT env var to `''`, so `env.X == ''` is TRUE when the key is missing
+    // — while a naive `env.X === ''` translation is false for `undefined` and silently
+    // inverts the gate.
     .replace(/env\.([A-Z_]+)\s*!=\s*''/g, "!!env.$1")
-    .replace(/env\.([A-Z_]+)\s*==\s*'([^']*)'/g, "env.$1 === '$2'");
+    .replace(/''\s*!=\s*env\.([A-Z_]+)/g, "!!env.$1")
+    .replace(/env\.([A-Z_]+)\s*==\s*''/g, "!env.$1")
+    .replace(/''\s*==\s*env\.([A-Z_]+)/g, "!env.$1")
+    .replace(/env\.([A-Z_]+)\s*==\s*'([^']*)'/g, "env.$1 === '$2'")
+    .replace(/'([^']*)'\s*==\s*env\.([A-Z_]+)/g, "env.$2 === '$1'");
   // Nothing but identifiers, the two boolean operators, parens and quoted literals may
   // survive the translation. A gate that grew a construct this evaluator does not model
   // must fail the test rather than be silently approximated.
   assert.match(js, /^[\sa-zA-Z0-9_.!&|()'=]+$/, `unmodelled if: syntax in ${JSON.stringify(expr)}`);
-  // A LEFTOVER `!=` or a two-character `==`; `===` is what the translation produces.
+  // A LEFTOVER `!=` or a two-character `==`, on EITHER side. Anchoring only on an
+  // `env.`-prefixed LEFT operand let `'' != env.X` through the sanitiser and into JS loose
+  // equality, which is the opposite of the fail-loud contract above.
   assert.doesNotMatch(js, /env\.[A-Z_]+\s*(?:!=|==(?!=))/, `an untranslated comparison survived: ${js}`);
+  assert.doesNotMatch(js, /(?:!=|==(?!=))\s*env\.[A-Z_]+/, `an untranslated reversed comparison survived: ${js}`);
   return new Function("env", `return (${js});`)({ ALLOW_METERED: "", ...env });
 }
 
@@ -98,6 +109,20 @@ test("every credential combination that makes a leg RUN also installs that leg's
     assert.equal(evalGate(gates.claude, env), claudeWillRun, `${name}: the Claude CLI install gate disagrees with claudeAuthMode`);
     assert.equal(evalGate(gates.codex, env), codexWillRun, `${name}: the Codex CLI install gate disagrees with codexAuthMode`);
   }
+});
+
+test("the gate translator fails loudly rather than approximating", () => {
+  // The docstring promises fail-loud, so it is tested rather than believed. These are the
+  // exact forms the first version let through: a reversed operand slipped past a
+  // left-anchored sanitiser and then evaluated with JS loose equality.
+  assert.equal(evalGate("env.X == ''", {}), true, "GitHub resolves an absent variable to the empty string");
+  assert.equal(evalGate("'' == env.X", {}), true, "and the same, with the operands the other way round");
+  assert.equal(evalGate("env.X == ''", { X: "v" }), false);
+  assert.equal(evalGate("'' != env.X", { X: "v" }), true);
+  assert.equal(evalGate("'' != env.X", {}), false);
+  // Anything the translator does not model must throw, never be quietly assumed true.
+  assert.throws(() => evalGate("contains(env.X, 'a')", {}), /unmodelled if: syntax/);
+  assert.throws(() => evalGate("env.X > 3", {}), /unmodelled if: syntax/);
 });
 
 test("a key on its own never installs a metered CLI, because holding one is not consent", () => {

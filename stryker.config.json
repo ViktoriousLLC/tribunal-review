@@ -15,9 +15,11 @@
     "cheap gate stays cheap and this runs weekly (.github/workflows/mutation.yml).",
     "",
     "BASELINE: 401 mutants, 285 killed, 116 survived, score 71.07 (billing-verify.mjs 67.82,",
-    "the eval-reviewer credential ranges 79.46). 76 seconds on one machine. `break` is set AT",
-    "that baseline rather than at an aspiration, so the run fails on a REGRESSION and does not",
-    "cry wolf about a number we already know. Raise it when the survivors are killed; the",
+    "the eval-reviewer credential ranges 79.46). 76 seconds on one machine. `break` is set at",
+    "exactly that baseline, fractional part included: a rounded-down 71 would have passed a",
+    "score of 71.00, which is a regression the job would have reported as green. Not an",
+    "aspiration either — the run fails on a REGRESSION and does not cry wolf about a number we",
+    "already know. Raise it when the survivors are killed; the",
     "survivors themselves are the to-do list, and reports/mutation/mutation.json names them.",
     "",
     "Run it locally with: npx @stryker-mutator/core@9.6.1 run"
@@ -39,7 +41,7 @@
   "thresholds": {
     "high": 90,
     "low": 75,
-    "break": 71
+    "break": 71.07
   },
   "tempDirName": ".stryker-tmp",
   "cleanTempDir": true
