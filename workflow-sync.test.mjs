@@ -46,30 +46,43 @@ function evalGate(expr, env) {
     // resolves an ABSENT env var to `''`, so `env.X == ''` is TRUE when the key is missing
     // — while a naive `env.X === ''` translation is false for `undefined` and silently
     // inverts the gate.
-    .replace(/env\.([A-Z_]+)\s*!=\s*''/g, "!!env.$1")
-    .replace(/''\s*!=\s*env\.([A-Z_]+)/g, "!!env.$1")
-    .replace(/env\.([A-Z_]+)\s*==\s*''/g, "!env.$1")
-    .replace(/''\s*==\s*env\.([A-Z_]+)/g, "!env.$1")
-    .replace(/env\.([A-Z_]+)\s*==\s*'([^']*)'/g, "env.$1 === '$2'")
-    .replace(/'([^']*)'\s*==\s*env\.([A-Z_]+)/g, "env.$2 === '$1'");
+    .replace(/env\.(\w+)\s*!=\s*''/g, "!!env.$1")
+    .replace(/''\s*!=\s*env\.(\w+)/g, "!!env.$1")
+    .replace(/env\.(\w+)\s*==\s*''/g, "!env.$1")
+    .replace(/''\s*==\s*env\.(\w+)/g, "!env.$1")
+    .replace(/env\.(\w+)\s*==\s*'([^']*)'/g, "env.$1 === '$2'")
+    .replace(/'([^']*)'\s*==\s*env\.(\w+)/g, "env.$2 === '$1'");
   // Nothing but identifiers, the two boolean operators, parens and quoted literals may
   // survive the translation. A gate that grew a construct this evaluator does not model
   // must fail the test rather than be silently approximated.
   assert.match(js, /^[\sa-zA-Z0-9_.!&|()'=]+$/, `unmodelled if: syntax in ${JSON.stringify(expr)}`);
-  // A LEFTOVER `!=` or a two-character `==`, on EITHER side. Anchoring only on an
-  // `env.`-prefixed LEFT operand let `'' != env.X` through the sanitiser and into JS loose
-  // equality, which is the opposite of the fail-loud contract above.
-  assert.doesNotMatch(js, /env\.[A-Z_]+\s*(?:!=|==(?!=))/, `an untranslated comparison survived: ${js}`);
-  assert.doesNotMatch(js, /(?:!=|==(?!=))\s*env\.[A-Z_]+/, `an untranslated reversed comparison survived: ${js}`);
+  // A LEFTOVER `!=` or a two-character `==`, on EITHER side. Two ways this used to fail
+  // loud-ly-in-name-only: anchoring on the LEFT operand alone let `'' != env.X` through
+  // into JS loose equality, and `[A-Z_]+` stopped matching at the first digit, so
+  // `env.GPT5_KEY != ''` was neither translated NOR caught — the sanitiser permits digits,
+  // so it reached `new Function` and evaluated with JavaScript's absent-is-undefined
+  // instead of GitHub's absent-is-empty-string. `\w` matches what a name can contain.
+  assert.doesNotMatch(js, /env\.\w+\s*(?:!=|==(?!=))/, `an untranslated comparison survived: ${js}`);
+  assert.doesNotMatch(js, /(?:!=|==(?!=))\s*env\.\w+/, `an untranslated reversed comparison survived: ${js}`);
   return new Function("env", `return (${js});`)({ ALLOW_METERED: "", ...env });
 }
 
+/**
+ * Two things here are deliberate. The split is on ANY step (`- ` at six spaces), not on
+ * `- name: ` — splitting on named steps only made a chunk run past an unnamed `- uses:`
+ * step, so that step's `if:` was attributed to the previous NAMED one, which is a green
+ * test asserting the wrong gate. And it reads the review job rather than the whole file,
+ * so a same-named step elsewhere cannot last-write the map.
+ */
 function installGates() {
   const { template } = readPair();
+  const jobStart = template.indexOf("\n  review:");
+  assert.ok(jobStart > -1, "the review job must exist — did it get renamed?");
   const gates = {};
-  const steps = template.split(/^ {6}- name: /m).slice(1);
-  for (const step of steps) {
-    const name = step.split("\n")[0].trim();
+  for (const step of template.slice(jobStart).split(/^ {6}- /m).slice(1)) {
+    const first = step.split("\n")[0].trim();
+    if (!first.startsWith("name:")) continue; // an unnamed `- uses:` step owns its own if:
+    const name = first.slice("name:".length).trim();
     const m = step.match(/^ {8}if: (.+)$/m);
     if (!m) continue;
     if (/Install Claude CLI/.test(name)) gates.claude = m[1];
@@ -120,9 +133,26 @@ test("the gate translator fails loudly rather than approximating", () => {
   assert.equal(evalGate("env.X == ''", { X: "v" }), false);
   assert.equal(evalGate("'' != env.X", { X: "v" }), true);
   assert.equal(evalGate("'' != env.X", {}), false);
+  // A name with a DIGIT in it. `[A-Z_]+` matched neither the translator nor the leftover
+  // guard here, and the sanitiser permits digits, so this reached JS untranslated and
+  // inverted the gate silently — the exact failure the helper exists to prevent.
+  assert.equal(evalGate("env.GPT5_KEY != ''", {}), false);
+  assert.equal(evalGate("env.GPT5_KEY != ''", { GPT5_KEY: "k" }), true);
+  assert.equal(evalGate("env.GPT5_KEY == ''", {}), true);
   // Anything the translator does not model must throw, never be quietly assumed true.
   assert.throws(() => evalGate("contains(env.X, 'a')", {}), /unmodelled if: syntax/);
   assert.throws(() => evalGate("env.X > 3", {}), /unmodelled if: syntax/);
+});
+
+test("a gate is read off the step that owns it, not the one above it", () => {
+  // The template interleaves named steps and bare `- uses:` steps. A splitter keyed on
+  // `- name: ` ran each chunk past those, so an unnamed step's `if:` could be attributed
+  // to the previous named one and the matrix above would pin the wrong gate while staying
+  // green. Assert the three gates are the ones actually written in the template.
+  const gates = installGates();
+  assert.match(gates.claude, /CLAUDE_CODE_OAUTH_TOKEN/);
+  assert.match(gates.codex, /CODEX_AUTH_JSON/);
+  assert.match(gates.seed, /CODEX_AUTH_JSON/);
 });
 
 test("a key on its own never installs a metered CLI, because holding one is not consent", () => {

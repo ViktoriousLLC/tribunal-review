@@ -1944,6 +1944,13 @@ export function claudeCliArgs(model, system) {
     "Review the PR content provided on stdin, following your system instructions exactly. Output ONLY the JSON object.",
     "--disallowedTools",
     CLAUDE_REFUSED_TOOLS.join(","),
+    // HOW FAR THE EVIDENCE GOES, stated because the Codex list below has stronger. That
+    // one was verified BEHAVIOURALLY: the model could read a file outside its cwd, and with
+    // the flags could not. These two were verified to parse and to let a run complete, and
+    // the workflow re-checks at install time that the pinned CLI still lists them. Nobody
+    // has demonstrated that an EMPTY `--setting-sources` value loads zero sources rather
+    // than falling back to a default. KNOWN-ISSUES.md says so out loud.
+    //
     // The denylist above only covers BUILT-IN tools. A machine that has configured MCP
     // servers, hooks, skills or plugins at the user level hands this process a second set
     // of tools the list has never heard of — and HOME is forwarded, so on a developer

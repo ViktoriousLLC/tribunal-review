@@ -160,6 +160,18 @@ jobs:
       - name: Install Codex CLI (the GPT leg)
         if: steps.dedup.outputs.skip != 'true' && (env.CODEX_AUTH_JSON != '' || (env.OPENAI_API_KEY != '' && env.ALLOW_METERED == 'true'))
         run: npm install -g @openai/codex@0.144.5   # pinned: parseCodexJsonl is coupled to this CLI's --json event shape
+      # The Claude leg's flags get an install-time check, and for a while this leg did not,
+      # which is the same one-checked-one-trusted asymmetry the refusals themselves exist to
+      # close, repeated one level up. `CODEX_DISABLED_FEATURES` names sixteen features by
+      # string; a pin bump that RENAMES or REMOVES one leaves this leg reading an untrusted
+      # diff with that capability switched back on, and the CLI does not complain.
+      - name: Check the pinned Codex CLI still names every feature the reviewer disables
+        if: steps.dedup.outputs.skip != 'true' && (env.CODEX_AUTH_JSON != '' || (env.OPENAI_API_KEY != '' && env.ALLOW_METERED == 'true'))
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex features list > "$RUNNER_TEMP/codex-features.txt"
+          node "$RUNNER_TEMP/tribunal/node_modules/tribunal-review/scripts/check-codex-features.mjs" "$RUNNER_TEMP/codex-features.txt"
       # Seed the plan credential into a runner-local CODEX_HOME. The secret is read from
       # the environment by the seeder (never an inline expression, never argv), so its
       # value cannot land in the command line or the run log, and the file is created

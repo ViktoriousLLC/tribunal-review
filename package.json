@@ -24,13 +24,14 @@
     "KNOWN-ISSUES.md",
     "LICENSE",
     "tribunal-cli.test.mjs",
-    "workflow-sync.test.mjs"
+    "workflow-sync.test.mjs",
+    "check-codex-features.test.mjs"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test eval-reviewer.test.mjs eval-dedup.test.mjs billing-verify.test.mjs seed-codex-auth.test.mjs tribunal-cli.test.mjs workflow-sync.test.mjs",
+    "test": "node --test eval-reviewer.test.mjs eval-dedup.test.mjs billing-verify.test.mjs seed-codex-auth.test.mjs tribunal-cli.test.mjs workflow-sync.test.mjs check-codex-features.test.mjs",
     "sync:workflow": "node scripts/sync-workflow.mjs"
   },
   "keywords": [
