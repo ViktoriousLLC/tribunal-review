@@ -108,5 +108,8 @@ test("init tells you to point the workflow at this package, not just the README"
   // Derived from package.json, so a fork prints its own repository instead of confidently
   // sending its users to this one.
   assert.match(src, /const PACKAGE_REPO = /, "the repository name must come from package.json, not a literal");
-  assert.doesNotMatch(init, /github:ViktoriousLLC/, "no hardcoded owner in the printed command");
+  // The owner name is read from package.json here too rather than written into this file:
+  // the repo's own deny-list scan flags the company name anywhere but the package manifest.
+  const owner = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).repository.url.split("/").at(-2);
+  assert.doesNotMatch(init, new RegExp(`github:${owner}`), "no hardcoded owner in the printed command");
 });
