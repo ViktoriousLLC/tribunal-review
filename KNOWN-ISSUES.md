@@ -40,14 +40,21 @@ stops that happening under a run you did not choose; when you unpin it, re-read
 
 **The Claude leg's is the same shape**, `--disallowedTools` plus `--strict-mcp-config` and
 an empty `--setting-sources`, against `@anthropic-ai/claude-code@2.1.220`. Same caveat, same
-mitigation, and one weaker piece of evidence worth naming: the Codex list was verified
-BEHAVIOURALLY (the model could reach a file, then could not). The Claude flags were verified
-only to parse and let a run complete, and the workflow re-checks at install time that the
-pinned CLI still lists them. Nobody has demonstrated that an empty `--setting-sources` value
-loads zero sources rather than falling back to a default. If it silently means "defaults",
-ambient user-level hooks, skills and plugins would still load through the forwarded `HOME`
-with every assertion green. On a GitHub-hosted runner that set is empty anyway; on a
-self-hosted runner it is exactly the thing to check first.
+mitigation. `--disallowedTools` is verified behaviourally too: with a file inside the working
+directory and no denylist, the model reads it and returns the contents; with the
+comma-joined list, the same prompt answers CANNOT and no read happens.
+
+**`--setting-sources ""` is the one that is only parse-verified.** Nobody has demonstrated
+that an empty value loads zero sources rather than falling back to a default. If it silently
+means "defaults", ambient user-level hooks, skills and plugins would still load through the
+forwarded `HOME` with every assertion green. On a GitHub-hosted runner that set is empty
+anyway; on a self-hosted runner it is exactly the thing to check first.
+
+**The mutation baselines were measured on a developer machine, not on a runner.** Both
+`break` thresholds therefore carry one point of provisional tolerance. Replace them with the
+first scheduled run's own score and close the gap; a gate pinned at zero tolerance to a
+number its own environment has never produced cries wolf, which is the failure this package
+spends its comments arguing against.
 
 ## Not tested on
 

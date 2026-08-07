@@ -1944,12 +1944,18 @@ export function claudeCliArgs(model, system) {
     "Review the PR content provided on stdin, following your system instructions exactly. Output ONLY the JSON object.",
     "--disallowedTools",
     CLAUDE_REFUSED_TOOLS.join(","),
-    // HOW FAR THE EVIDENCE GOES, stated because the Codex list below has stronger. That
-    // one was verified BEHAVIOURALLY: the model could read a file outside its cwd, and with
-    // the flags could not. These two were verified to parse and to let a run complete, and
-    // the workflow re-checks at install time that the pinned CLI still lists them. Nobody
-    // has demonstrated that an EMPTY `--setting-sources` value loads zero sources rather
-    // than falling back to a default. KNOWN-ISSUES.md says so out loud.
+    // THE COMMA-JOINED VALUE IS ENFORCED, measured rather than assumed. A panel round
+    // called this a blocker on the grounds that nothing proved the CLI splits one argv
+    // token holding sixteen names, and that the test re-split the same string the producer
+    // joined, so it was green under either parsing. Fair, and wrong: with a file INSIDE the
+    // working directory and no denylist, the model read it and returned the contents; with
+    // this exact comma-joined list and the same prompt, it answered CANNOT and performed no
+    // read. Parsing and enforcement, both demonstrated.
+    //
+    // What is still only PARSE-verified is `--setting-sources ""` below: nobody has shown
+    // that an empty value loads zero sources rather than falling back to a default.
+    // KNOWN-ISSUES.md says so out loud, and the workflow re-checks at install time that the
+    // pinned CLI still lists all three flags.
     //
     // The denylist above only covers BUILT-IN tools. A machine that has configured MCP
     // servers, hooks, skills or plugins at the user level hands this process a second set
