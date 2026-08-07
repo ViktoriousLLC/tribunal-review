@@ -7,6 +7,7 @@
 // while three surfaces agreed it was $0.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { billingVerdict, billingLogLine, meteredOutputTokens, openaiMeteredOutputTokens, classifyModelRow } from "./billing-verify.mjs";
 
 test("the OpenAI reader counts only the eval's own models, and answers in tokens", async () => {
@@ -426,4 +427,27 @@ test("classifyModelRow accepts Anthropic's undashed date suffix, not only OpenAI
   assert.equal(classifyModelRow("claude-opus-5-turbo", models), "ambiguous");
   assert.equal(classifyModelRow("claude-opus-5-202601", models), "ambiguous");
   assert.equal(classifyModelRow("claude-sonnet-4-6", models), "other");
+});
+
+test("an ambiguous row only refuses when it could change the answer", () => {
+  // Refusing the whole read on an unattributable row was right in principle and too broad
+  // in practice. A zero-token row gives the identical total counted or skipped, so refusing
+  // on one throws away a verdict for nothing — and the case that makes it matter is a point
+  // release: an organisation running `claude-opus-5-1-...` beside our `claude-opus-5`
+  // produces an ambiguous row on EVERY read, so a whole-report refusal is "unverified"
+  // forever. A control that is permanently silent is not a control. (Panel catch.)
+  const src = readFileSync(new URL("./billing-verify.mjs", import.meta.url), "utf8");
+  // Split on the marker rather than trying to match a brace-balanced block: a length-bounded
+  // regex silently stopped finding the second branch the moment its comment grew, which is
+  // the "green because it stopped looking" failure this file is full of warnings about.
+  const branches = src.split('if (attribution === "ambiguous") {').slice(1);
+  assert.equal(branches.length, 2, "both readers have an ambiguous branch");
+  for (const b of branches) {
+    const skip = b.indexOf("Number(x.output_tokens) === 0");
+    const refuse = b.indexOf("return unmeasurable");
+    assert.ok(skip > -1, "a zero-token row must not cost the verdict");
+    assert.ok(skip < refuse, "the cheap skip has to come BEFORE the refusal, or it never runs");
+  }
+  // And the classifier that feeds them still refuses a real sibling rather than guessing.
+  assert.equal(classifyModelRow("claude-opus-5-1-20260101", ["claude-opus-5"]), "ambiguous");
 });

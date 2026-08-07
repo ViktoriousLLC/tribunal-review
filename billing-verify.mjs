@@ -182,10 +182,20 @@ export async function meteredOutputTokens({ adminKey, sinceIso, models, allowEmp
         const attribution = classifyModelRow(String(x.model), models);
         if (attribution === "other") continue;
         if (attribution === "ambiguous") {
+          // ONLY when it could change the answer. A row whose token count is zero gives the
+          // identical total whether we count it or skip it, so refusing on one throws away a
+          // verdict for nothing. The point release is the case that makes this matter: an
+          // organisation running `claude-opus-5-1-...` beside our `claude-opus-5` produces
+          // an ambiguous row on EVERY read, and a whole-report refusal there is "unverified"
+          // forever — this classifier's own comment turned against it, because a control
+          // that is permanently silent is not a control.
+          if (Number(x.output_tokens) === 0) continue;
           return unmeasurable(
             `usage report row "${x.model}" starts with one of the panel's models but is not a dated ` +
               "snapshot of it, so it cannot be attributed. Counting it would over-report and skipping " +
-              "it would under-report, and an under-read renders as plan-covered."
+              "it would under-report, and an under-read renders as plan-covered. If that id is a " +
+              "sibling model somebody else in your organisation runs, this refuses on every read until " +
+              "it is named: add it to the panel's model list or narrow the admin key's scope."
           );
         }
         // `?? 0` on a row we are actually counting turns a missing field into a verified
@@ -296,6 +306,9 @@ export async function openaiMeteredOutputTokens({ adminKey, sinceEpoch, models, 
         const attribution = classifyModelRow(String(x.model), models);
         if (attribution === "other") continue;
         if (attribution === "ambiguous") {
+          // Same rule as the Anthropic reader above: refuse only on a row that could change
+          // the total. A zero-token ambiguous row costs a verdict and buys nothing.
+          if (Number(x.output_tokens) === 0) continue;
           return unmeasurable(
             `OpenAI usage report row "${x.model}" starts with one of the panel's models but is not a dated ` +
               "snapshot of it, so it is either a sibling model or an unknown snapshot format. Counting it " +
