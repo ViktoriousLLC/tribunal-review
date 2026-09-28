@@ -12,7 +12,7 @@ One line inside Claude Code, then restart the session:
 
 That's it. The panel runs on whatever you're already signed in to. The Claude CLI gives you the Claude seat and the Codex CLI adds two ChatGPT seats, and a seat whose CLI isn't installed just gets skipped and named in the output, so a missing tool never counts as a failed review.
 
-## What happens after that
+## What runs automatically
 
 Two things happen on their own, and one you ask for.
 
@@ -27,6 +27,12 @@ Two things happen on their own, and one you ask for.
 ```
 
 The plugin name sits in front of the command because Claude Code puts it in front of every plugin command, so two plugins can both ship a `review` without colliding. There's no way to drop it from inside a plugin.
+
+Either gate turns off with one line in your repository's `tribunal.config.json`:
+
+```json
+{ "gates": { "goalWall": false, "mergeGate": false } }
+```
 
 ## What a round gives you
 
