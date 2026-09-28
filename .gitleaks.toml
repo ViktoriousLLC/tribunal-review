@@ -1,0 +1,13 @@
+# Secret-scan policy for this repository (gitleaks).
+#
+# The isolation probe plants a CANARY token shaped like a credential on purpose: the probe
+# measures whether a guarded reviewer can read it. Fixtures carry literal canaries of that
+# shape. They are not secrets, and a scanner that flags them is reading the design, not a leak.
+title = "tribunal-review"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Probe canaries are deliberately credential-shaped fakes"
+regexes = ['''TRIBUNAL-CANARY-[0-9a-f]+''']

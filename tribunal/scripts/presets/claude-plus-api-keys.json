@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "Claude + API keys: opus runs through the Claude CLI subscription; the API example is disabled.",
+    "The compatible example needs a real model, endpoint, and verified price pins before use.",
+    "A key variable is read only after its name and destination origin are bound in ~/.tribunal/trust.json.",
+    "A copied config is how a key is stolen; stop and think before trusting a new destination."
+  ],
+  "legs": [
+    {
+      "leg": "opus",
+      "id": "claude-opus-5",
+      "vendor": "anthropic",
+      "runner": "claude-cli",
+      "billing": "plan",
+      "envKeys": [
+        "CLAUDE_CODE_OAUTH_TOKEN"
+      ],
+      "enabled": true,
+      "note": "Independent review through the Claude CLI subscription."
+    },
+    {
+      "$comment": "Example only. Empty price pins are intentionally UNPRICED; configure verified pricesUSDPer1M for the selected model.",
+      "leg": "compatible",
+      "id": "your-model-id",
+      "vendor": "compatible",
+      "runner": "openai-api",
+      "baseUrl": "https://api.example.com/v1",
+      "billing": "metered",
+      "envKeys": ["COMPATIBLE_API_KEY"],
+      "requiredEnv": ["COMPATIBLE_API_KEY"],
+      "timeoutMs": 120000,
+      "pricesUSDPer1M": {},
+      "enabled": false,
+      "note": "Optional OpenAI-compatible reviewer. Set the endpoint, model, and verified price pins before enabling.",
+      "disabledReason": "Disabled template. Verify the endpoint and bind its origin in ~/.tribunal/trust.json before enabling this metered leg."
+    }
+  ]
+}

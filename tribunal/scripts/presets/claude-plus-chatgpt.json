@@ -1,0 +1,95 @@
+{
+  "$comment": [
+    "One registry row defines each Tribunal leg, including all fallback model ids.",
+    "Plan legs authenticate through the installed vendor CLI and receive no spend-capable API key.",
+    "envKeys lists environment variable NAMES allowed through; requiredEnv names variables required to run.",
+    "Credentials are supplied by the invoking process environment or the vendor CLI account store. No credential files are loaded.",
+    "Use one account per vendor. Do not pool credentials or proxy tokens.",
+    "The Gemini SDK entry is a disabled metered template. A repository may enable it via tribunal.config.json."
+  ],
+  "legs": [
+    {
+      "leg": "opus",
+      "id": "claude-opus-5",
+      "vendor": "anthropic",
+      "runner": "claude-cli",
+      "billing": "plan",
+      "envKeys": [
+        "CLAUDE_CODE_OAUTH_TOKEN"
+      ],
+      "enabled": true,
+      "note": "Independent review through the Claude CLI subscription."
+    },
+    {
+      "leg": "fable",
+      "id": "claude-fable-5",
+      "vendor": "anthropic",
+      "runner": "claude-cli",
+      "billing": "plan",
+      "envKeys": [
+        "CLAUDE_CODE_OAUTH_TOKEN"
+      ],
+      "enabled": false,
+      "note": "Optional Claude CLI subscription leg; disabled by default.",
+      "disabledReason": "Disabled by default. Enable through repository config when the subscription allowance is available; never buy a capped leg back."
+    },
+    {
+      "leg": "sol",
+      "id": "gpt-5.6-sol",
+      "vendor": "openai",
+      "runner": "codex-cli",
+      "billing": "plan",
+      "envKeys": [
+        "CODEX_HOME"
+      ],
+      "enabled": true,
+      "note": "Independent review through the Codex CLI subscription."
+    },
+    {
+      "leg": "astra",
+      "id": "gpt-6-astra",
+      "vendor": "openai",
+      "runner": "codex-cli",
+      "billing": "plan",
+      "envKeys": [
+        "CODEX_HOME"
+      ],
+      "enabled": true,
+      "note": "Independent review through the Codex CLI subscription."
+    },
+    {
+      "leg": "gemini",
+      "id": "gemini-3.8-flash",
+      "fallback": "gemini-3.7-flash",
+      "vendor": "google",
+      "runner": "genai-sdk",
+      "billing": "metered",
+      "envKeys": [
+        "GEMINI_API_KEY"
+      ],
+      "requiredEnv": [
+        "GEMINI_API_KEY"
+      ],
+      "pricesUSDPer1M": {
+        "gemini-3.8-flash": {
+          "in": 0.75,
+          "out": 3.75,
+          "until": "2026-12-31"
+        },
+        "gemini-3.7-flash": {
+          "in": 0.75,
+          "out": 3.75,
+          "until": "2026-12-31"
+        },
+        "gemini-3.5-flash": {
+          "in": 1.5,
+          "out": 9
+        }
+      },
+      "pricesSource": "ai.google.dev/gemini-api/docs/pricing, 3.7 and 3.5 read 2026-09-07 and 3.8 read 2026-09-11 (paid tier, standard). The 3.8 and 3.7 figures are promotional through 2026-12-31 and DOUBLE on 2027-01-01 to $1.50 in / $7.50 out; 3.5 carries no `until` and is not promotional — re-pin then. An unpriced or usage-silent call banks as null, never $0.",
+      "enabled": false,
+      "note": "Optional Google SDK reviewer. Only the GEMINI_API_KEY environment variable name is configured; no credential value or location is stored.",
+      "disabledReason": "Disabled template. A repository enables this metered leg via tribunal.config.json and supplies GEMINI_API_KEY in the invoking environment."
+    }
+  ]
+}

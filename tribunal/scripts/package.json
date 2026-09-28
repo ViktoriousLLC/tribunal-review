@@ -1,0 +1,15 @@
+{
+  "name": "tribunal-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Tribunal scripts. Plan CLI runners are dependency-free; install locally with npm ci only when enabling the optional Gemini SDK leg.",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "2.21.0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

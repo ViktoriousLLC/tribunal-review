@@ -1,0 +1,51 @@
+{
+  "name": "tribunal-review",
+  "version": "0.9.0",
+  "description": "Cross-model review panel for Claude Code: reviews PRs, files, goal statements and pasted text on the Claude and ChatGPT subscriptions you already hold, with an enforced convergence loop and honest cost reporting.",
+  "license": "Apache-2.0",
+  "author": "Viktorious LLC",
+  "keywords": [
+    "claude-code",
+    "claude-code-plugin",
+    "code-review",
+    "cross-model",
+    "review-panel",
+    "convergence",
+    "codex",
+    "gemini"
+  ],
+  "bin": {
+    "tribunal-review": "./scripts/run.mjs",
+    "tribunal-review-doctor": "./scripts/doctor.mjs",
+    "tribunal-review-probe": "./scripts/isolationProbe.mjs"
+  },
+  "files": [
+    ".claude-plugin/",
+    "commands/",
+    "hooks/",
+    "scripts/",
+    "README.md",
+    "LICENSE",
+    "!hooks/*.test.cjs",
+    "!hooks/*.negative-control.cjs",
+    "!scripts/*.test.mjs",
+    "!scripts/*.negative-control.mjs",
+    "!scripts/node_modules/",
+    "!scripts/.*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/ViktoriousLLC/tribunal-review#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ViktoriousLLC/tribunal-review.git",
+    "directory": "tribunal"
+  },
+  "bugs": {
+    "url": "https://github.com/ViktoriousLLC/tribunal-review/issues"
+  }
+}

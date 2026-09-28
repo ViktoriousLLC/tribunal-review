@@ -1,0 +1,6 @@
+# Every text file is committed and checked out with LF on every platform. The command file's
+# YAML frontmatter fails to parse when a Windows clone converts it to CRLF, leaving the plugin
+# with empty metadata.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

@@ -1,0 +1,11 @@
+{
+  "preset": "claude-plus-chatgpt",
+  "modelsFile": "review/models.json",
+  "reviewerPromptPath": "review/reviewer.md",
+  "ledgerHome": "../tribunal-history/example-project",
+  "goalsDir": "plans/goals",
+  "gates": { "goalWall": true, "mergeGate": true },
+  "enabledLegs": ["opus", "sol", "astra"],
+  "disabledLegs": ["fable", "gemini"],
+  "envFile": ".tribunal.env.local"
+}

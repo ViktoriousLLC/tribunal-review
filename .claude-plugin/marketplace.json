@@ -1,0 +1,12 @@
+{
+  "name": "viktorious",
+  "description": "Plugins by Viktorious LLC.",
+  "owner": { "name": "Viktorious LLC" },
+  "plugins": [
+    {
+      "name": "tribunal-review",
+      "source": "./tribunal",
+      "description": "Cross-model review panel: reviews PRs, files, goal statements and pasted text on subscriptions you already pay for, with an enforced convergence loop."
+    }
+  ]
+}

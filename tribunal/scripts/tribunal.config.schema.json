@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tribunal repository configuration",
+  "description": "All fields are optional. Paths resolve from the consuming repository root; absolute paths are also accepted. Configure paths, leg names, and gate switches, never credential values. Registry membership and file contents are checked by policy.mjs at runtime.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "preset": {
+      "type": "string",
+      "enum": ["claude-only", "claude-plus-chatgpt", "claude-plus-api-keys"],
+      "description": "Select a bundled registry. An explicit modelsFile takes precedence; without either field, models.default.json is used."
+    },
+    "modelsFile": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Path to a custom model registry. Copy and edit the bundled models.default.json; this overrides preset."
+    },
+    "reviewerPromptPath": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Path to the reviewer prompt. Defaults to the plugin's prompts/reviewer-default.md."
+    },
+    "ledgerHome": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Directory for monthly ledgers, isolation-probe.md, and goal-wall and merge-gate state. Defaults to ~/.tribunal/<repo-folder>-<root-path-hash>/."
+    },
+    "goalsDir": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Directory whose Markdown goals the reminder and goal wall check. Defaults to docs/reference/goals."
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Both gates default to true. Set either switch to false to opt out of that gate.",
+      "properties": {
+        "goalWall": {
+          "type": "boolean",
+          "description": "Block the end of a reply for changed goals without a complete panel row for their exact bytes. Defaults to true."
+        },
+        "mergeGate": {
+          "type": "boolean",
+          "description": "Block identified PR merges without a recorded panel row. False restores the merge reminder. Defaults to true."
+        }
+      }
+    },
+    "enabledLegs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Registry leg names to enable in addition to registry defaults. Names must exist in the selected registry."
+    },
+    "disabledLegs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Registry leg names to disable. Disabling takes precedence over enabledLegs; names must exist in the selected registry."
+    },
+    "envFile": {
+      "type": "string",
+      "pattern": "\\S",
+      "description": "Path to a gitignored NAME=VALUE file. The config stores only its path; an existing environment value takes precedence. No file is loaded by default, and a missing file is allowed."
+    }
+  }
+}
