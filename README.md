@@ -1,6 +1,6 @@
 # Tribunal Review
 
-The problem today is that when Claude makes a plan, it only knows what it knows, and it cannot judge it, look at it from an objective third-party perspective, and analyze it. Codex and Gemini have completely different brains and can critically give feedback. There are many tools that can do this on a metered basis, where you pay per review, but none that use a plan (the Claude or ChatGPT subscription you already pay for).
+The problem today is that when Claude makes a plan, it only knows what it knows, and it cannot judge it, look at it from an objective third-party perspective and analyze it. Codex and Gemini have completely different brains and can critically give feedback. There are many tools that can do this on a metered basis, where you pay per review, but none that use a plan (the Claude or ChatGPT subscription you already pay for).
 
 I built Tribunal Review, a Claude Code plugin that has other AI models review Claude's work using your current plan, and you don't have to pay for metered usage.
 
