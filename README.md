@@ -1,55 +1,44 @@
 # Tribunal Review
 
-Claude checking its own work has the same blind spots it had while writing it. Tribunal Review has other AI models check it too.
+The problem today is that when Claude makes a plan, it only knows what it knows, and it cannot judge it, look at it from an objective third-party perspective, and analyze it. Codex and Gemini have completely different brains and can critically give feedback. There are many tools that can do this on a metered basis, where you pay per review, but none that use a plan (the Claude or ChatGPT subscription you already pay for).
 
-Every goal Claude writes and every pull request it opens gets reviewed by ChatGPT (through the Codex CLI) and, if you turn it on, Gemini. Each model reviews on its own, without seeing the others. You get one list of the problems they found, including the ones only one model caught. It runs on the Claude and ChatGPT subscriptions you already have, so it costs nothing extra.
+I built Tribunal Review, a Claude Code plugin that has other AI models review Claude's work using your current plan, and you don't have to pay for metered usage.
 
-## Install
+## How it works
 
-Paste this into Claude Code, then start a new session:
+1. **Install it and connect your accounts.** Paste this into Claude Code and open a new session:
 
-```text
-/plugin install tribunal-review --marketplace ViktoriousLLC/tribunal-review
-```
+   ```text
+   /plugin install tribunal-review --marketplace ViktoriousLLC/tribunal-review
+   ```
 
-If the Codex CLI is installed and signed in, ChatGPT joins the review. Without it, only Claude reviews.
+   Then connect ChatGPT (on your plan, through the Codex CLI, OpenAI's coding agent) and Gemini if you want it (metered, on your own key). Other models are coming soon. Open an issue on this repo if you need one prioritized.
+
+2. **Several models read the same work.** Opus reviews it on the Claude side, plus Fable if you turn it on, and the top two ChatGPT models, Sol and Astra, review it on the ChatGPT side. Each one reviews on its own, without seeing the others. You get one merged list of problems, and the problems only one model caught are listed separately. A review takes 2 to 3 minutes.
 
 ## What runs automatically
 
-1. **Pull requests.** `gh pr merge 123` is blocked until PR 123 has been reviewed.
-2. **Goals.** When you change a goal file, Claude can't finish its reply until that version has been reviewed.
+The whole point of building this was that every PR and every goal statement is automatically run by the Tribunal.
 
-To review anything else yourself:
+- **Every goal statement.** When Claude writes a goal (the plan it works from on a bigger build), it gets reviewed before Claude can finish its reply.
+- **Every pull request.** `gh pr merge` isn't allowed until the pull request has been reviewed.
+
+It reruns up to 10 times. If the review finds problems, Claude fixes them and the Tribunal runs again on the fixed version, so you don't have to keep sitting there asking it to review again and again. It stops the first time a round comes back with nothing to fix.
+
+You can also run it yourself on any file:
 
 ```text
-/tribunal-review:review docs/plan.md      a file
-/tribunal-review:review 123               a pull request
-/tribunal-review:review                   the current conversation
+/tribunal-review:review docs/plan.md
 ```
 
-To turn either automatic review off, add this to `tribunal.config.json` in your repository:
+The command is long because Claude Code puts the plugin name in front of every plugin command, and there's no way around it.
+
+## Turning the automatic reviews off
+
+Both automatic reviews are on when you install. If you'd rather it only runs when you type the command yourself, add this to `tribunal.config.json` in your repo:
 
 ```json
 { "gates": { "goalWall": false, "mergeGate": false } }
 ```
 
-## What you get back
-
-- The problems found, sorted by how serious they are, each with the file and how to check it.
-- The problems only one model found. Those are the reason to use more than one.
-- Whether to keep going or stop. When a review comes back with nothing new, it stops.
-- What it cost. Subscription models show `$0 (plan)`.
-
-A review takes two to three minutes. The first one takes about a minute longer.
-
-## Cost
-
-Claude and ChatGPT run on your subscriptions. Gemini is off by default and is paid per use on your own API key. The plugin only talks to the AI companies you set up ([SECURITY.md](SECURITY.md)).
-
-## Try it
-
-A small repository with planted bugs to test it on:
-
-https://github.com/ViktoriousLLC/tribunal-review-demo
-
-Settings, adding other models and everything else: [docs/REFERENCE.md](docs/REFERENCE.md). Licence [Apache 2.0](LICENSE).
+Settings, adding models and exit codes are all in [docs/REFERENCE.md](docs/REFERENCE.md).
