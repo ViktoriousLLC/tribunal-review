@@ -110,8 +110,9 @@ the user's files.
 ## Automatic review gates
 
 The default Stop hook requires a complete document panel row for the current bytes of a goal
-that differs from `origin/main`. The merge gate requires a recorded panel row for an explicit
-PR number in `gh pr merge`; it does not verify the PR's current head. Both direct the assistant
+that differs from `origin/main`. The merge gate requires a complete (non-PARTIAL) diff panel
+row for an explicit PR number in `gh pr merge`; it does not verify the PR's current head, and a
+merge hidden inside `bash -c`, a script file or an alias is not seen. Both direct the assistant
 to `/tribunal-review:review`. They block at most three times per item per session, then stand
 down with a notice. These local controls do not replace repository branch protection.
 

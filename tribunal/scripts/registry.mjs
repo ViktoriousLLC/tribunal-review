@@ -12,19 +12,34 @@ import { openaiApiEnvironment, openaiApiRowProblems } from "./openaiApi.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REGISTRY_PATH = join(HERE, "models.default.json");
 
-const RUNNERS = new Set(["claude-cli", "codex-cli", "genai-sdk", "openai-api"]);
+const RUNNERS = new Set(["claude-cli", "codex-cli", "grok-cli", "genai-sdk", "openai-api"]);
 const BILLING = new Set(["plan", "metered"]);
 
 /**
  * Credentials that must NEVER be handed to a leg that runs an agent CLI.
  *
- * The two agent runners read untrusted input and can hold a shell if their refusal flags
+ * The agent runners read untrusted input and can hold a shell if their refusal flags
  * fail, so a spend-capable key in their environment is one prompt injection away from being
  * someone else's. Plain SDK/API legs have no tools; the compatible API runner additionally
  * requires the key's name and destination origin to be bound in the user's trust file.
  */
-const AGENT_RUNNERS = new Set(["claude-cli", "codex-cli"]);
-const SPEND_KEYS = new Set(["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY"]);
+const AGENT_RUNNERS = new Set(["claude-cli", "codex-cli", "grok-cli"]);
+const SPEND_KEYS = new Set(["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "XAI_API_KEY"]);
+
+/** A trial seat's last day, as YYYY-MM-DD. The seat runs through that UTC day and is off after it. */
+export const UNTIL_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/** A YYYY-MM-DD that names a real calendar day. Date.parse alone rolls 2026-02-31 to 03-03. */
+function realDay(day) {
+  const t = Date.parse(`${day}T00:00:00Z`);
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === day;
+}
+
+/** Has this seat's `until` day passed? A seat with no `until` never expires. */
+export function seatExpired(leg, now = new Date()) {
+  if (!leg || leg.until === undefined) return false;
+  return !(now.getTime() < Date.parse(`${leg.until}T00:00:00Z`) + 86_400_000);
+}
 
 export function validateLegs(legs) {
   const problems = [];
@@ -48,6 +63,16 @@ export function validateLegs(legs) {
     if (!Array.isArray(l.envKeys)) problems.push(`${at} has no envKeys array`);
     if (typeof l.enabled !== "boolean") problems.push(`${at} has no boolean enabled`);
     if (l.runner === "openai-api") problems.push(...openaiApiRowProblems(l).map((problem) => `${at} ${problem}`));
+    // An ADVISORY seat reports findings that never count: it cannot make a round partial, quiet
+    // or blocked. A trial seat is advisory so a new model is heard before it can hold a merge.
+    if (l.advisory !== undefined && typeof l.advisory !== "boolean") problems.push(`${at} has a non-boolean advisory`);
+    if (l.until !== undefined && !(typeof l.until === "string" && UNTIL_PATTERN.test(l.until)
+      && realDay(l.until))) problems.push(`${at} has until "${l.until}", expected a real YYYY-MM-DD date`);
+    // 6/7: a Grok seat's ONLY variable is its panel home. The denylist of spend keys cannot list
+    // every name a future Grok build might read a key from, so this runner gets an allowlist.
+    if (l.runner === "grok-cli" && !(Array.isArray(l.envKeys) && l.envKeys.length === 1 && l.envKeys[0] === "GROK_HOME")) {
+      problems.push(`${at} is a grok-cli seat; its envKeys must be exactly ["GROK_HOME"]`);
+    }
 
     // The two invariants that are about safety rather than shape.
     if (Array.isArray(l.envKeys) && AGENT_RUNNERS.has(l.runner)) {

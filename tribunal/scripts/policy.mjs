@@ -4,12 +4,12 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadRegistry } from "./registry.mjs";
+import { loadRegistry, seatExpired } from "./registry.mjs";
 import { resolveExe } from "./executable.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PRESETS = ["claude-only", "claude-plus-chatgpt", "claude-plus-api-keys"];
-const CLI_OF_RUNNER = { "claude-cli": "claude", "codex-cli": "codex" };
+const CLI_OF_RUNNER = { "claude-cli": "claude", "codex-cli": "codex", "grok-cli": "grok" };
 
 /**
  * Seats whose CLI is not installed on this machine are skipped, not failed.
@@ -32,7 +32,7 @@ function skipUninstalledSeats(registry, { enabledLegs, customRegistry, resolveEx
   });
 }
 
-export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolveExe } = {}) {
+export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolveExe, now = new Date() } = {}) {
   const workingDirectory = resolve(cwd);
   let repoRoot = workingDirectory;
   for (let candidate = workingDirectory; ; candidate = dirname(candidate)) {
@@ -89,7 +89,12 @@ export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolve
   const registry = skipUninstalledSeats(loadRegistry(modelsFile).map((leg) => ({
     ...leg,
     enabled: disabledLegs.includes(leg.leg) ? false : enabledLegs.includes(leg.leg) ? true : leg.enabled,
-  })), { enabledLegs, customRegistry: config.modelsFile !== undefined || config.preset !== undefined, resolveExecutable });
+  })), { enabledLegs, customRegistry: config.modelsFile !== undefined || config.preset !== undefined, resolveExecutable })
+    // A seat past its `until` day is off even when enabledLegs names it: the date is the trial's
+    // own end, and a trial that outlives it would keep spending an allowance nobody re-approved.
+    .map((leg) => leg.enabled && seatExpired(leg, now)
+      ? { ...leg, enabled: false, expired: true, disabledReason: `Trial seat ended on ${leg.until}. Extend or remove until in the models file to run it again.` }
+      : leg);
   for (const leg of [...enabledLegs, ...disabledLegs]) {
     if (!registry.some((entry) => entry.leg === leg)) throw new Error(`unknown configured leg: ${leg}`);
   }

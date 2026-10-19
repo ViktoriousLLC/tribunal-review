@@ -70,19 +70,54 @@ node "<installed-plugin-root>/scripts/run.mjs" --print-policy
 
 The ledger home holds monthly `YYYY-MM.ndjson` files and `isolation-probe.md`. No ledger or
 probe is written into the reviewed repository by default. Both gates read this same home.
-The merge gate requires a recorded panel row for an explicit PR number; a bare `gh pr merge`
-stays silent because it identifies no PR. Goal writes under `goalsDir` get a reminder;
+The merge gate requires a COMPLETE panel row for its PR number: a diff round whose decision is
+not PARTIAL or UNREADABLE and on which at least two DISTINCT models answered and parsed (one
+model is not a panel, a registry shrunk to one leg completes every round by construction, and two
+seats on one model are still one opinion). A complete round
+that still found actionable findings unlocks the merge, because the gate proves a review
+happened and the operator reads the verdict; the gate then shows a `systemMessage` naming the
+latest round and its actionable count. It is silent only after a `QUIET` round: any other
+verdict warns, including a `REDO`, where the previous round's findings are still present.
+Legs count only with kind `answered` and a named model, so a leg with no model fails closed. The newest incomplete round with a recorded verdict that found findings (a
+leg hit its plan limit after a fix), when it is newer than the latest complete round, cannot
+unlock the merge, but is named in the same notice rather than hidden behind the older complete
+round. A row with no recorded verdict (a crashed round) is not shown. Two models is the gate's floor; the PR proof comment needs three
+(`MIN_PROOF_LEGS`), so a two-model panel unlocks the local gate and posts no proof. The goal
+wall applies the same floor but does not warn on findings. A merge that names no number (the current branch, a branch name, a variable,
+a GraphQL node id) cannot be checked, so it blocks as `UNVERIFIED` and asks for the number,
+under one three-block budget per session shared by all unnumbered merges. A REST merge (`gh api ... pulls/<n>/merge`) counts as a merge
+of that PR. It reads commands from both the Bash and PowerShell tools and finds a merge in any
+piece a shell runs (after a newline, `;`, `&&`, `|`, `&`, a subshell or command substitution),
+after shell keywords, common wrappers (`env`, `exec`, `timeout`, `nice`, `winpty`, `npx`,
+`cmd /c`), a leading redirection, `VAR=value` or PowerShell's `$out =`, and with gh's own `-R`
+before `pr`. Quoted text, a heredoc body and a PowerShell here-string are prose, except a command
+substitution inside them, which the shell runs. Not seen: a merge inside `bash -c "..."`, `powershell -Command "..."`, a
+script file, an alias or a deliberately escaped name (`g\h`). A merge in a branch or function
+that never runs still blocks. Rows carry no repository, so a review of another repository's
+PR #7 (a shared `ledgerHome`, or `--pr 7 --repo other/x`) unlocks this one's PR #7. The parser
+is a guard against forgetting the review, not against someone hiding a merge from it. Goal writes under `goalsDir` get a reminder;
 the goal wall enforces review at Stop. Hooks resolve the consumer root by walking upward
 from `CLAUDE_PROJECT_DIR` when set, otherwise their working directory, using the same policy
 resolution as the runner. Goal paths are matched under that root's configured directory;
 case is folded only on Windows and macOS. A goal is **reviewed at this content** only when
-its current bytes' SHA-256 appears in a document ledger row with a decision from a complete,
-non-PARTIAL round. An older version or an incomplete attempt does not suppress the reminder.
+its current bytes' SHA-256 appears in a document ledger row from a complete round (the merge
+gate's rule: not PARTIAL or UNREADABLE, at least two distinct models read). An older version or
+an incomplete attempt does not suppress the reminder. The goal wall checks goal files that
+differ from `origin/main` in this checkout, so a goal written, merged and pulled back within one
+reply, or written in a sibling worktree, is not checked at Stop. The merge gate still asks for a
+review of that PR's diff, which contains the goal text, but that is a code review, not a review
+of the goal statement.
 Hooks direct the assistant to `/tribunal-review:review`; they never run a model themselves.
 The merge gate checks recorded PR identity; it does not fetch or compare the PR's current head.
 Each gate blocks at most three times per session for a given goal's bytes or PR number,
 then stands down loudly. Brake state lives under `ledgerHome`; unavailable state also
-causes a loud stand-down. Goal verification errors use a bounded `UNVERIFIED` block.
+causes a loud stand-down, shown as a `systemMessage` (Claude Code does not show stderr when a
+hook allows). Goal verification errors use a bounded `UNVERIFIED` block. Each hook has a
+60-second timeout and its own 40-second budget: Claude Code lets the action through when it
+kills a hook, so a check that runs out of time blocks as `UNVERIFIED`, through the same brake.
+The budget is checked between git calls and ledger reads; a single read, or loading the policy
+files, that hangs past the timeout is still a pass. `TRIBUNAL_HOOK_BUDGET_MS` (whole
+milliseconds, at most 40000) shortens the budget for tests; an empty or malformed value keeps 40000.
 Automation that performs its own review can set `TRIBUNAL_ALLOW_UNREVIEWED_MERGE=1`;
 the merge gate allows with a visible notice. Setting `gates.mergeGate` to `false`
 retains the merge reminder without blocking.

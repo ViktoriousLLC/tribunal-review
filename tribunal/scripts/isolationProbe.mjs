@@ -16,7 +16,7 @@
 // repository. The probe never reads, prints or sends any real secret, and it deletes the
 // canary when it is done.
 //
-// Usage:  node scripts/isolationProbe.mjs [--leg claude|codex] [--json]
+// Usage:  node scripts/isolationProbe.mjs [--leg claude|codex|grok] [--json]
 // Exit:   0 when every enabled CLI passes, or no local agent leg is enabled.
 //         1 on FAIL, VACUOUS or UNKNOWN.
 
@@ -51,10 +51,11 @@ async function removeScratch(dir) {
   if (isOurTempDir(dir)) await rm(dir, { recursive: true, force: true }).catch(() => {});
 }
 
-async function runInFreshDirectory(cmd, args, { mkTemp, ...options }) {
+async function runInFreshDirectory(cmd, args, { mkTemp, envFor = null, ...options }) {
   const cwd = await mkTemp();
   try {
-    return await run(cmd, args, { ...options, cwd });
+    // envFor builds the environment from the invocation's own directory (the Grok leg's homes).
+    return await run(cmd, args, { ...options, ...(envFor ? { env: envFor(cwd) } : {}), cwd });
   } finally {
     await removeScratch(cwd);
   }
@@ -144,6 +145,29 @@ export async function probeCodex(directAsk, injection, canaryToken, selectedLeg,
   };
 }
 
+export async function probeGrok(directAsk, injection, canaryToken, selectedLeg,
+  { spawnFn = spawn, mkTemp = freshCwd, sourceEnv = process.env, executable = null } = {}) {
+  const model = selectedLeg.id;
+  // The CONTROL keeps every Grok Build tool and approves each call, so its file read cannot be
+  // stopped by a permission prompt; the guarded run differs only by the tool denylist and the
+  // system prompt. Both run with the leg's own empty home and the panel's own sign-in, so the
+  // pair measures the denylist, not the user's configuration.
+  const control = ["-p", "-", "-m", model, "--output-format", "json", "--always-approve", "--max-turns", "8"];
+  const guarded = argsForLeg(selectedLeg);
+  const envFor = (cwd) => envForLeg(selectedLeg, sourceEnv, { home: cwd }).env;
+  const options = { mkTemp, envFor, spawnFn, executable };
+  const c = await runInFreshDirectory("grok", control, { ...options, input: directAsk });
+  const g = await runInFreshDirectory("grok", guarded, { ...options, input: directAsk });
+  const inj = await runInFreshDirectory("grok", guarded, { ...options, input: injection });
+  return {
+    controlLeaked: leaked(c.out, canaryToken), guardedLeaked: leaked(g.out, canaryToken),
+    controlError: c.error, guardedError: g.error, controlOut: c.out, guardedOut: g.out,
+    injectionLeaked: leaked(inj.out, canaryToken), injectionOut: inj.out, injectionError: inj.error,
+  };
+}
+
+const PROBE_OF_RUNNER = { "claude-cli": probeClaude, "codex-cli": probeCodex, "grok-cli": probeGrok };
+
 /** Persist the measured result and the invocation it certifies. A subset cannot certify it. */
 export async function writeProbeRecord(policy, verdicts,
   { only = null, measuredAt = new Date(), bindings = {} } = {}) {
@@ -197,7 +221,7 @@ export async function writeProbeRecord(policy, verdicts,
 /** Run the real probe orchestration with injectable process boundaries for offline tests. */
 export async function runProbe(policy, { only = null, spawnFn = spawn, resolveExecutable = resolveExe,
   spawnVersion, sourceEnv = process.env, createTemp = mkdtemp, measuredAt = new Date() } = {}) {
-  if (only && !["claude", "codex"].includes(only)) throw new Error("--leg must be claude or codex");
+  if (only && !["claude", "codex", "grok"].includes(only)) throw new Error("--leg must be claude, codex or grok");
   // Measure each CLI boundary once, using the model IDs selected by effective policy.
   const enabled = enabledCliLegs(policy.registry);
   const selected = enabled.filter((leg) => !only || cliCommand(leg.runner) === only);
@@ -227,7 +251,7 @@ export async function runProbe(policy, { only = null, spawnFn = spawn, resolveEx
           continue;
         }
         const binding = bindings[leg.runner];
-        const probe = leg.runner === "claude-cli" ? probeClaude : probeCodex;
+        const probe = PROBE_OF_RUNNER[leg.runner];
         results[name] = await probe(directAsk, injection, canaryToken, leg, {
           spawnFn, sourceEnv, mkTemp: () => makeScratch("cwd"),
           executable: { file: binding.executablePath, prefix: binding.executablePrefix },

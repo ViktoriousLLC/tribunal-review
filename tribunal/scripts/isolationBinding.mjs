@@ -2,10 +2,10 @@
 // that legRunner uses, with model selection excluded from the boundary's shape.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { argsForLeg, envForLeg } from "./legRunner.mjs";
+import { argsForLeg, envForLeg, GROK_FIXED_ENV, GROK_HOME_VARS } from "./legRunner.mjs";
 import { resolveExe } from "./executable.mjs";
 
-const CLI_COMMANDS = { "claude-cli": "claude", "codex-cli": "codex" };
+const CLI_COMMANDS = { "claude-cli": "claude", "codex-cli": "codex", "grok-cli": "grok" };
 
 export function cliCommand(runner) {
   return Object.hasOwn(CLI_COMMANDS, runner) ? CLI_COMMANDS[runner] : null;
@@ -21,7 +21,12 @@ export function enabledCliLegs(registry) {
 }
 
 export function argvShapeHash(leg) {
-  return createHash("sha256").update(JSON.stringify(argsForLeg({ ...leg, id: "" }))).digest("hex");
+  // The Grok leg's isolation rests on its environment as much as its argv (redirected homes, fixed
+  // switches), so a change to either invalidates a recorded PASS. Other runners hash argv only.
+  const shape = leg.runner === "grok-cli"
+    ? { argv: argsForLeg({ ...leg, id: "" }), env: GROK_FIXED_ENV, homes: GROK_HOME_VARS }
+    : argsForLeg({ ...leg, id: "" });
+  return createHash("sha256").update(JSON.stringify(shape)).digest("hex");
 }
 
 /** --version is bounded and never invokes a model. Failed/empty output is no measurement. */

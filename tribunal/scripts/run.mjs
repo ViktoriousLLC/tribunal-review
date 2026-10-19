@@ -43,10 +43,37 @@ const REPROBE_REASONS = new Set([
 ]);
 
 /** Admit a panel: read the gate, take the missing measurement if that is all it needs, read again. */
-export async function admitPanel(policy, { probeOptions = {}, probe = runProbe, log = console.error } = {}) {
+async function admitOnce(policy, { probeOptions, probe, log }) {
   const gate = isolationGate(policy, probeOptions);
   if (gate.ok || !probe || !REPROBE_REASONS.has(gate.reason)) return gate;
   log(`[probe] ${gate.reason}: measuring the reviewer boundary before the first review (real CLI calls, about a minute)...`);
+  try { await probe(policy); }
+  catch (error) { return { ok: false, reason: "PROBE-FAILED", why: `the isolation probe could not run: ${error.message}` }; }
+  return isolationGate(policy, probeOptions);
+}
+
+/**
+ * Admit the panel, or refuse it. An ADVISORY seat cannot refuse it: when the boundary is not
+ * proven with an advisory-only CLI type enabled (a trial seat signed out, say), that seat is
+ * turned off for this run, loudly, and the counted seats are admitted on their own measurement.
+ * The advisory seat still never runs unisolated; it just does not take the panel down with it.
+ */
+export async function admitPanel(policy, { probeOptions = {}, probe = runProbe, log = console.error } = {}) {
+  const gate = await admitOnce(policy, { probeOptions, probe, log });
+  if (gate.ok) return gate;
+  const countedRunners = new Set(policy.registry.filter((l) => l.enabled && !l.advisory).map((l) => l.runner));
+  const drop = policy.registry.filter((l) => l.enabled && l.advisory && cliCommand(l.runner) && !countedRunners.has(l.runner));
+  if (!drop.length) return gate;
+  for (const leg of drop) {
+    leg.enabled = false;
+    leg.disabledReason = `Advisory seat dropped for this run: its isolation is not proven (${gate.why}).`;
+    log(`[probe] ${leg.leg}: advisory seat dropped for this run; the counted seats are admitted without it. Cause: ${gate.why}`);
+  }
+  // The record on disk still names the dropped seat's verdict, which no re-probe reason covers,
+  // so measure the remaining seats now rather than refusing on a record that is no longer the panel.
+  const again = isolationGate(policy, probeOptions);
+  if (again.ok || !probe) return again;
+  log("[probe] re-measuring the counted seats without the dropped advisory seat...");
   try { await probe(policy); }
   catch (error) { return { ok: false, reason: "PROBE-FAILED", why: `the isolation probe could not run: ${error.message}` }; }
   return isolationGate(policy, probeOptions);
@@ -237,6 +264,34 @@ function bank(record, ledgerHome) {
   } catch (e) {
     return e.message;
   }
+}
+
+/**
+ * Split a round's results into the seats that count and the ADVISORY seats that do not.
+ *
+ * An advisory seat is heard, never counted: it cannot make a round partial, quiet or blocked,
+ * and its findings never reach the loop decision, the proof or the actionable count. This is
+ * how a new model is trialled on real reviews before it is allowed to hold a merge.
+ */
+export function splitAdvisory(results, registry) {
+  const advisory = new Set((registry || []).filter((l) => l.advisory === true).map((l) => l.leg));
+  return { counted: results.filter((r) => !advisory.has(r.leg)), advisory: results.filter((r) => advisory.has(r.leg)) };
+}
+
+/** What an advisory seat said, rendered beside the review and labelled as not counted. */
+export function renderAdvisory(advisory) {
+  if (!advisory.length) return "";
+  const lines = ["", "## Advisory seats (trial; heard, not counted toward quiet, partial or blocking)"];
+  for (const r of advisory) {
+    if (r.kind !== "answered") { lines.push(`- ${r.leg} (${r.model}): did not review: ${r.error || r.reason || "no reply"}`); continue; }
+    const findings = Array.isArray(r.findings) ? r.findings : [];
+    lines.push(`- ${r.leg} (${r.model}): ${findings.length} finding(s)`);
+    for (const f of findings) {
+      const where = f && f.file ? ` (${f.file}${f.line ? `:${f.line}` : ""})` : "";
+      lines.push(`  - [${f?.severity || "?"}] ${f?.title || "untitled"}${where}${f?.why ? `: ${f.why}` : ""}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Any enabled leg without parseable findings leaves the round PARTIAL. */
@@ -457,7 +512,7 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
     const started = Date.now();
     // Run legs in parallel for speed, each in its own directory to prevent CLI conversation
     // state from carrying one reviewer's context into another review.
-    const results = [
+    const allResults = [
       ...await Promise.all(legs.map((l) => reviewLeg(l, message))),
       ...credentialAbsent.map(({ leg, missing }) => {
         const outcome = classifyLegOutcome({ missingCredentials: missing, model: leg.id });
@@ -469,6 +524,8 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
         findings: [], raw: "", parseFailed: false })),
     ];
     const elapsedMs = Date.now() - started;
+    // Everything below reads only the seats that count; advisory seats are reported beside it.
+    const { counted: results, advisory } = splitAdvisory(allResults, all);
 
     const status = panelStatus(results);
     const warnings = [...demotionWarnings(results, all), ...repeatedReplyWarnings(results, readdirNative, readFileSync, policy.ledgerHome)];
@@ -511,11 +568,15 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
       // compare against and the loop can never notice a fix that did not land.
       actionableFindings: summary.actionable.map((f) => ({ title: f.title, file: f.file, severity: f.severity, category: f.category, foundBy: f.foundBy })),
       soleFinds: soleFindsByLeg(clusters),
+      // Banked apart from `legs` so no gate that counts legs ever counts an advisory seat.
+      advisory: advisory.map((r) => ({ leg: r.leg, model: r.model, kind: r.kind, error: r.error,
+        findings: (r.findings || []).map((f) => ({ title: f?.title, severity: f?.severity, file: f?.file ?? null })) })),
       decision: { action: decision.action, reason: decision.reason },
       // Bank measured cost so metered legs cannot inherit an unconditional zero. A leg whose
       // runner reports no usage remains null ("not reported"), because silence is not free.
-      metered: meteredSummary(results, all),
+      metered: meteredSummary(allResults, all),
     };
+    const countedMetered = meteredSummary(results, all);
     const recurrence = recurringFindings([...history, record]);
     const bankError = bank(record, policy.ledgerHome);
     // A proof certifies that a complete, parseable panel reviewed this commit; it can include
@@ -527,13 +588,13 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
     const postProof = flag("post-proof");
     const proof = !bankError && isRecordableRound(summary)
       ? postLocalProof(artifact, round, elapsedMs, results, arg("repo"), spawnSync, decision, summary,
-        { metered: record.metered, post: postProof })
+        { metered: countedMetered, post: postProof })
       : null;
     const preview = !postProof && proof ? proof : null;
 
     const signal = recurrence.map((finding) => `RECURRING FINDING (channel signal)\n${finding.title}\nRounds: ${finding.rounds.join(", ")}`).join("\n\n");
     const out = [status, ...warnings, ...(signal ? ["", signal] : []), "", render({ artifact, clusters, summary, decision,
-      legs: remaining, round, elapsedMs, disabled, metered: record.metered }), ...(preview ? ["", preview] : [])].join("\n");
+      legs: remaining, round, elapsedMs, disabled, metered: countedMetered }), ...(advisory.length ? [renderAdvisory(advisory)] : []), ...(preview ? ["", preview] : [])].join("\n");
     const text = flag("json") ? JSON.stringify({ record, clusters, summary, decision, recurrence, recurrenceSignal: signal || null,
       ...(preview ? { proof: preview } : {}) }, null, 2) : out;
     const dest = arg("out");

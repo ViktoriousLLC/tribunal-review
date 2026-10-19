@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.10.3 — 2026-10-19
+
+Three design calls left open by the v0.10.2 break-it pass.
+
+- One model is not a panel. A ledger row now counts as a review, for both the merge gate and
+  the goal wall, only when at least two DISTINCT models answered and parsed (legs of kind
+  `answered` with a named model only, deduplicated by model; both hooks share one tested rule). A registry shrunk to one leg used to complete, and
+  pass, every round by construction. An `UNREADABLE` round (every leg answered, none parsed) no
+  longer counts either. Upgrading re-judges rows already in the ledger: measured on the
+  maintainer's 1,113 complete rows (every leg banked with kind `answered` and a model), exactly
+  one stopped counting, a one-model review.
+- A complete round that still found actionable findings keeps unlocking the merge (the gate
+  proves a review happened; the verdict is the operator's call), and the hook now says so: a
+  visible notice names the latest round and its actionable count, in both gate and reminder
+  mode, after any verdict but `QUIET`, including a `REDO` (the fix did not land). A later quiet
+  round clears it. A newer
+  incomplete round that found findings is named too, instead of hiding behind an older quiet one.
+- Known limit, documented rather than fixed: the goal wall checks goal files that differ from
+  `origin/main` in this checkout, so a goal merged and pulled back within one reply, or written
+  in a sibling worktree, is not checked at Stop.
+- A parser timing test's bound went from 2s to 10s: the input takes about 1.5s, so 2s failed
+  under a loaded run, and catastrophic backtracking still takes minutes.
+
+## v0.10.2 — 2026-10-18
+
+From the first break-it pass (two attackers, Claude and Codex, running attempts against the real
+hooks; the procedure is now a release step in `docs/BREAK-IT.md`).
+
+- A merge that names no PR number (`gh pr merge --squash` on the current branch, a branch name,
+  a variable such as `$PR`, a GraphQL merge) used to pass silently, by design, because the
+  ledger is keyed by number. It was the most common merge an agent types, so it now blocks as
+  `UNVERIFIED` and asks for the number, under its own three-block budget per session.
+- `gh api -X PUT ... pulls/<n>/merge` counts as a merge of PR n (the plain GET form only reads
+  merge status and is left alone).
+- Recognised now: gh's repo flag before `pr` (`-R x`, `-Rx`, `--repo=x`), `GH`, a leading
+  redirection (`2>/dev/null gh`, `2> /dev/null gh`), `nice -n 10`, `winpty`, `npx`, `cmd /c`
+  (quoted or not), PowerShell `$out = gh pr merge 7`, `-F/--body-file` values, PR URLs ending in
+  `/files`, `/` or `#...`, and `'#7'`.
+- PowerShell here-strings (`@'...'@`, `@"..."@`) are parsed as text, so an apostrophe inside one
+  no longer swallows the next command; block comments (`<# #>`) are skipped; `${#ARRAY[@]}` is no
+  longer read as a comment.
+- Known limits now name that ledger rows carry no repository.
+
+## v0.10.1 — 2026-10-18
+
+Fixes from an outside review that faked ledger rows against both gates.
+
+- The merge gate counted ANY ledger row naming the PR, so a round in which every leg failed
+  (decision PARTIAL) or a row with no decision unlocked the merge. It now needs a complete diff
+  round, the same rule the goal wall already used.
+- The merge gate split commands only on `&&`, `||`, `;` and `|`, so a merge on its own line
+  after `git push` was missed. It now splits the way a shell does: newlines, `&`, subshells,
+  braces and command substitution (also inside double quotes and unquoted heredocs), with line
+  continuations joined, comments skipped, quotes and heredoc bodies kept as prose, and shell
+  keywords (`if`, `!`), wrappers (`env`, `exec`, `timeout 60`), `VAR=value`, and a full,
+  quoted or `.exe` path before `gh` recognised.
+- The merge gate now also reads commands from the PowerShell tool, not only Bash, with
+  PowerShell's own escape and continuation character (the backtick).
+- The goal wall's break-glass and stand-down banners went to stderr with exit 0, which Claude
+  Code does not show. They are now a `systemMessage` on stdout.
+- Hooks had a 10-second timeout, and Claude Code lets the action through when it kills a hook.
+  The timeout is now 60 seconds, each hook keeps its own 40-second budget and BLOCKS as
+  `UNVERIFIED` (through the three-per-item brake) when it runs out, and both hooks parse only
+  the ledger lines that name the PR or goal hash in question.
+
+## v0.10.0 — 2026-10-16
+
+- New `grok-cli` runner: xAI's Grok Build CLI as a plan-billed review leg. It runs with every
+  built-in tool removed by name (an empty `--tools` allowlist removes nothing), web search off,
+  one turn, its own system prompt, and its home variables pointed at the invocation's empty
+  directory so it cannot read the user's rules, skills or MCP servers. It signs in through its own
+  Grok home (`~/.tribunal/grok-home`, or `TRIBUNAL_GROK_HOME`), never `~/.grok`, with API-key
+  login, self-update and telemetry switched off. `XAI_API_KEY` joins the spend keys an agent leg
+  can never receive. The isolation probe covers it (`--leg grok`).
+- New optional seat fields: `advisory: true` prints a seat's findings under their own heading and
+  keeps them out of every count (quiet, partial, blocking, proof, ledger `legs`), and
+  `until: "YYYY-MM-DD"` turns a seat off after that UTC day, even when `enabledLegs` names it; an impossible date such as 2026-02-31 is refused.
+- An advisory seat whose isolation is not proven (signed out, say) is dropped for that run with a
+  loud line, and the counted seats are admitted on their own measurement; it never refuses the
+  panel. `doctor` knows `grok-cli`, and an advisory seat that cannot run never fails `doctor`.
+
 ## v0.9.0 — 2026-09-28
 
 - The command is `/tribunal-review:review`; the published plugin name remains `tribunal-review`.

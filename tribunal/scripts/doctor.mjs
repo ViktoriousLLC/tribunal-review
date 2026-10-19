@@ -2,7 +2,7 @@
 // Run from the consumer repository: node <plugin-root>/scripts/doctor.mjs.
 // No model requests: only help/auth status, credential names, and filesystem checks.
 import { spawnSync } from "node:child_process";
-import { readFileSync, mkdirSync, openSync, closeSync, unlinkSync } from "node:fs";
+import { readFileSync, mkdirSync, openSync, closeSync, unlinkSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -128,6 +128,16 @@ export function runDoctor({ cwd = process.cwd(), policy = resolvePolicy(cwd), so
         details.push(`login: ${auth.login}`, `auth reply: ${auth.reply}`, `billing: ${auth.billing}`, `flags: ${flagDetail}`);
         runnable &&= flagsOK && auth.login === "logged-in";
       }
+    } else if (leg.runner === "grok-cli") {
+      // Grok Build has no auth-status command; the panel's own sign-in is its auth.json in the
+      // panel Grok home (never ~/.grok). Presence is all this can say, so a stale refresh token
+      // still shows as signed in here and is caught by the isolation probe instead.
+      const executable = resolveExeFn("grok", { env });
+      const signedIn = Boolean(env.GROK_HOME) && existsSync(join(env.GROK_HOME, "auth.json"));
+      runnable &&= executable.found && signedIn;
+      details.push(executable.found ? `binary: ${executable.file}` : "binary: grok missing on PATH and ~/.grok/bin",
+        `login: ${signedIn ? "panel Grok home has a sign-in" : `not signed in; run GROK_HOME=${env.GROK_HOME} grok login --device-auth`}`,
+        `billing: ${leg.billing}`, `advisory: ${leg.advisory === true}`);
     } else if (leg.runner === "genai-sdk") {
       const installed = sdkAvailableFn();
       runnable &&= installed;
@@ -143,7 +153,8 @@ export function runDoctor({ cwd = process.cwd(), policy = resolvePolicy(cwd), so
     details.push(`credentials: ${credentials}`);
     const state = leg.skippedNotInstalled ? "skipped" : leg.enabled ? "enabled" : "disabled";
     lines.push(`${leg.leg} [${state}]: ${runnable ? "runnable" : "not runnable"}; ${details.join("; ")}`);
-    if (leg.enabled && !runnable) ok = false;
+    // An advisory seat that cannot run is reported, never a failed doctor: it never counts.
+    if (leg.enabled && !runnable && !leg.advisory) ok = false;
   }
 
   lines.push("machine:");

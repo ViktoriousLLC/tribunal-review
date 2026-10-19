@@ -35,6 +35,11 @@ test.after(() => removeFixture(FIXTURES));
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
+/** What Claude Code SHOWS on an exit-0 allow: the systemMessage in stdout JSON. stderr is not shown. */
+function shown(r) {
+  try { return JSON.parse(r.stdout || '{}').systemMessage || ''; } catch { return ''; }
+}
+
 // This preload intercepts ONLY read-only Git calls made by the spawned hook. Unknown Git
 // operations fail rather than reaching a real executable, including all mutation commands.
 const PRELOAD = String.raw`
@@ -128,9 +133,12 @@ function runHook(root, { sessionId = 'sess-1', stopHookActive = false, env = {},
   });
 }
 
-function bankRow(ledgerHome, contentHash, decision = { action: 'CONTINUE', reason: 'ACTIONABLE' }) {
+// Two counted legs that answered and parsed: the floor a row needs to count as a review.
+const TWO_LEGS = [{ leg: 'a', model: 'm-a', answered: true, kind: 'answered', parseFailed: false }, { leg: 'b', model: 'm-b', answered: true, kind: 'answered', parseFailed: false }];
+
+function bankRow(ledgerHome, contentHash, decision = { action: 'CONTINUE', reason: 'ACTIONABLE' }, legs = TWO_LEGS) {
   fs.mkdirSync(ledgerHome, { recursive: true });
-  const row = { ts: new Date().toISOString(), artifact: { kind: 'document', source: `${GOALS}/x.md` }, contentHash, decision, runnerRound: 1, legs: [] };
+  const row = { ts: new Date().toISOString(), artifact: { kind: 'document', source: `${GOALS}/x.md` }, contentHash, decision, runnerRound: 1, legs };
   fs.appendFileSync(path.join(ledgerHome, '2026-09.ndjson'), `${JSON.stringify(row)}\n`);
 }
 
@@ -370,7 +378,7 @@ test('P6 the brake: three blocks for the same content, then a loud stand-down; a
     }
     const fourth = runHook(repo.root, { sessionId: 'sess-A' });
     assert.equal(fourth.status, 0, fourth.stderr);
-    if (!CONTROL) assert.match(fourth.stderr, /STAND-DOWN/);
+    if (!CONTROL) assert.match(shown(fourth), /STAND-DOWN/);
     const fresh = runHook(repo.root, { sessionId: 'sess-B' });
     assert.equal(fresh.status, BLOCK, fresh.stderr);
     // Same session, CHANGED content: fresh budget for the new bytes.
@@ -388,11 +396,11 @@ test('P7 break-glass present allows and says so, naming committed vs loose', () 
     fs.writeFileSync(path.join(repo.root, '.claude', 'tribunal-wall-breakglass'), 'fixture maintainer: temporary override\n');
     const loose = runHook(repo.root);
     assert.equal(loose.status, 0, loose.stderr);
-    if (!CONTROL) assert.match(loose.stderr, /BREAK-GLASS.*loose/);
+    if (!CONTROL) assert.match(shown(loose), /BREAK-GLASS.*loose/);
     gitFixture(repo.root, { glassTracked: true });
     const committed = runHook(repo.root);
     assert.equal(committed.status, 0, committed.stderr);
-    if (!CONTROL) assert.match(committed.stderr, /BREAK-GLASS.*committed/);
+    if (!CONTROL) assert.match(shown(committed), /BREAK-GLASS.*committed/);
   } finally { cleanup(repo); }
 });
 
@@ -404,7 +412,7 @@ test('P8 unwritable state stands down loudly instead of looping', () => {
     fs.mkdirSync(path.join(repo.ledgerHome, 'wall-state-sess-1.json'), { recursive: true }); // a directory where the state file goes
     const r = runHook(repo.root, { sessionId: 'sess-1' });
     assert.equal(r.status, 0, r.stderr);
-    if (!CONTROL) assert.match(r.stderr, /STAND-DOWN/);
+    if (!CONTROL) assert.match(shown(r), /STAND-DOWN/);
   } finally { cleanup(repo); }
 });
 
@@ -438,7 +446,7 @@ test('R1 the bundled Stop hook blocks by default and README documents the config
   const registered = bundled.hooks.Stop?.flatMap((entry) => entry.hooks || []).find((hook) => /goal-wall\.js/.test(hook.command));
   assert.ok(registered, 'the shipped goal wall must be registered as a Stop hook');
   assert.equal(registered.type, 'command');
-  assert.equal(registered.timeout, 10);
+  assert.equal(registered.timeout, 60); // room for the 40s own budget: a killed hook is a silent pass
   const resolved = registered.command.replace('${CLAUDE_PLUGIN_ROOT}', path.resolve(__dirname, '..').replace(/\\/g, '/'));
   const scriptPath = resolved.match(/"([^"]+goal-wall\.js)"/)[1];
   assert.equal(path.resolve(scriptPath), path.resolve(REAL_GUARD));
@@ -485,7 +493,7 @@ test('U2 a DEGRADED state goes through the BRAKE too: three UNVERIFIED blocks, t
     }
     const fourth = runHook(repo.root, { sessionId: 'sess-U2' });
     assert.equal(fourth.status, 0, fourth.stderr);
-    assert.match(fourth.stderr, /STAND-DOWN/);
+    assert.match(shown(fourth), /STAND-DOWN/);
   } finally { cleanup(repo); }
 });
 
@@ -498,9 +506,9 @@ test('U3 a home that can hold neither ledger nor state stands down on the FIRST 
     dirtyGoal(repo.root);
     const r = runHook(repo.root, { sessionId: 'sess-U3' });
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr, /STAND-DOWN/);
-    assert.match(r.stderr, /UNVERIFIED/);
-    assert.match(r.stderr, /existing\.md/); // the unreviewed goal is still NAMED
+    assert.match(shown(r), /STAND-DOWN/);
+    assert.match(shown(r), /UNVERIFIED/);
+    assert.match(shown(r), /existing\.md/); // the unreviewed goal is still NAMED
   } finally { cleanup(repo); }
 });
 
@@ -671,5 +679,67 @@ test('E2E-DEFAULT runner and wall use the same default ledger home (slug parity)
     const after = runHook(repo.root, { sessionId: 'after', env: fixture.env });
     assert.equal(after.status, 0, after.stderr);
     assert.equal(after.stderr, '');
+  } finally { cleanup(repo); }
+});
+
+test('V1 an allow banner reaches the user: stdout JSON systemMessage, nothing on stderr', () => {
+  if (CONTROL) return;
+  const repo = mkRepo();
+  try {
+    dirtyGoal(repo.root);
+    fs.mkdirSync(path.join(repo.root, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(repo.root, '.claude', 'tribunal-wall-breakglass'), 'fixture\n');
+    const glass = runHook(repo.root, { sessionId: 'sess-V1' });
+    assert.equal(glass.status, 0);
+    assert.equal(glass.stderr, '', 'stderr on exit 0 is not shown, so nothing may depend on it');
+    assert.match(shown(glass), /BREAK-GLASS/);
+    fs.rmSync(path.join(repo.root, '.claude', 'tribunal-wall-breakglass'));
+    for (let i = 1; i <= 3; i += 1) assert.equal(runHook(repo.root, { sessionId: 'sess-V1' }).status, 2);
+    const down = runHook(repo.root, { sessionId: 'sess-V1' });
+    assert.equal(down.status, 0);
+    assert.equal(down.stderr, '');
+    assert.match(shown(down), /STAND-DOWN after 3 blocks/);
+  } finally { cleanup(repo); }
+});
+
+test('T1 a check that runs out of its own time budget BLOCKS as UNVERIFIED instead of being killed into a pass', () => {
+  const repo = mkRepo();
+  try {
+    dirtyGoal(repo.root);
+    const r = runHook(repo.root, { sessionId: 'sess-T1', env: { TRIBUNAL_HOOK_BUDGET_MS: '0' } });
+    assert.equal(r.status, BLOCK, r.stderr);
+    if (!CONTROL) {
+      assert.match(r.stderr, /UNVERIFIED/);
+      assert.match(r.stderr, /budget/);
+    }
+  } finally { cleanup(repo); }
+});
+
+test('B13 one leg, an UNREADABLE round, or legs that failed to parse is not a review and blocks', () => {
+  const one = [{ leg: 'a', model: 'm-a', answered: true, kind: 'answered', parseFailed: false }];
+  const unparsed = [...one, { leg: 'b', model: 'm-b', answered: true, kind: 'answered', parseFailed: true }];
+  for (const [decision, legs] of [
+    [{ action: 'STOP', reason: 'QUIET' }, one],
+    [{ action: 'STOP', reason: 'QUIET' }, unparsed],
+    [{ action: 'STOP', reason: 'UNREADABLE' }, TWO_LEGS],
+  ]) {
+    const repo = mkRepo();
+    try {
+      const hash = dirtyGoal(repo.root);
+      bankRow(repo.ledgerHome, hash, decision, legs);
+      const r = runHook(repo.root);
+      assert.equal(r.status, BLOCK, `${decision.reason} with ${legs.length} leg(s): ${r.stderr}`);
+    } finally { cleanup(repo); }
+  }
+});
+
+test('B14 two seats on one model are one opinion and block', () => {
+  const repo = mkRepo();
+  try {
+    const hash = dirtyGoal(repo.root);
+    bankRow(repo.ledgerHome, hash, { action: 'STOP', reason: 'QUIET' },
+      [{ leg: 'opus', model: 'm1', answered: true, kind: 'answered', parseFailed: false }, { leg: 'fable', model: 'm1', answered: true, kind: 'answered', parseFailed: false }]);
+    const r = runHook(repo.root);
+    assert.equal(r.status, BLOCK, r.stderr);
   } finally { cleanup(repo); }
 });

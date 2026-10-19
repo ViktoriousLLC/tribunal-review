@@ -18,7 +18,8 @@
 //             missing goals directory is clean. Any OTHER git failure is DEGRADED.
 //   CHECK     sha256 of the file's bytes (exactly what the tribunal runner banks as
 //             contentHash) must appear on a ledger row of kind "document" whose decision is
-//             not PARTIAL. Ledger home mirrors the plugin's policy: tribunal.config.json's
+//             not PARTIAL or UNREADABLE and on which at least two distinct models answered and parsed.
+//             Ledger home mirrors the plugin's policy: tribunal.config.json's
 //             ledgerHome if set, else ~/.tribunal/<folder>-<8 hex of sha256(root)>/. A MISSING
 //             ledger directory is an empty ledger and BLOCKS; an IO error reading rows is
 //             DEGRADED.
@@ -36,7 +37,12 @@
 //             gitignored). While it exists the wall allows and prints a BREAK-GLASS banner
 //             saying whether the file is committed or loose. Deliberate, never invisible.
 //   EXIT      0 allow, 2 block. Malformed hook input allows (a hook must never trap the
-//             assistant on its own bug).
+//             assistant on its own bug). A banner on an ALLOW (break-glass, stand-down) goes to
+//             STDOUT as JSON {systemMessage}: Claude Code does not show stderr on exit 0.
+//   TIME      Claude Code kills a hook past its hooks.json timeout and lets the reply end, a
+//             silent pass. The wall keeps its own budget (40s of the 60s timeout): a git call or
+//             ledger read past it is DEGRADED, which blocks through the brake. The budget is
+//             checked between reads, so one read that hangs the whole minute is still a pass.
 
 const fs = require('fs');
 const os = require('os');
@@ -48,6 +54,16 @@ const GOALS_DIR = 'docs/reference/goals';
 const BREAK_GLASS = '.claude/tribunal-wall-breakglass'; // repo-relative, forward slashes on every platform
 const MAX_BLOCKS = 3;
 const PREFIX = '[goal-wall]';
+// An empty or malformed value keeps the default, so a typo cannot zero the budget.
+const RAW_BUDGET = process.env.TRIBUNAL_HOOK_BUDGET_MS;
+const HOOK_BUDGET_MS = Math.min(40000, typeof RAW_BUDGET === 'string' && /^\s*\d+\s*$/.test(RAW_BUDGET) ? Number(RAW_BUDGET) : 40000);
+const DEADLINE = Date.now() + HOOK_BUDGET_MS;
+const budgetError = () => new Error(`the check ran past the hook's ${HOOK_BUDGET_MS / 1000}s budget`);
+
+/** An allow that must still be SEEN: stdout JSON, the channel Claude Code shows on exit 0. */
+function banner(text) {
+  process.stdout.write(JSON.stringify({ systemMessage: text.trimEnd() }));
+}
 
 function sha256(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
@@ -67,8 +83,10 @@ function findRepoRoot() {
 }
 
 function git(root, args) {
-  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
-  if (r.error) return { ok: false, error: r.error.message, stdout: '' };
+  const left = DEADLINE - Date.now();
+  if (left <= 0) return { ok: false, error: budgetError().message, stdout: '' };
+  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', timeout: left });
+  if (r.error) return { ok: false, error: r.error.code === 'ETIMEDOUT' ? budgetError().message : r.error.message, stdout: '' };
   if (r.status !== 0) return { ok: false, error: (r.stderr || '').trim() || `git exited ${r.status}`, stdout: r.stdout || '' };
   return { ok: true, stdout: r.stdout || '' };
 }
@@ -140,8 +158,30 @@ function repoSlug(root) {
   return `${path.basename(resolved) || 'root'}-${sha256(resolved).slice(0, 8)}`;
 }
 
-/** The set of contentHashes with a complete (non-PARTIAL) document row; ENOENT home = empty. */
-function reviewedHashes(ledgerHome) {
+/** One model is not a panel; mirrors tribunal-reminder.js. */
+const MIN_REVIEW_LEGS = 2;
+
+/** Distinct models among a row's legs that answered and parsed; mirrors tribunal-reminder.js. */
+function readLegs(row) {
+  if (!Array.isArray(row.legs)) return 0;
+  const read = row.legs.filter((l) => l && l.kind === 'answered' && l.answered === true && !l.parseFailed
+    && typeof l.model === 'string' && l.model.trim());
+  return new Set(read.map((l) => l.model.trim())).size;
+}
+
+/**
+ * A row is a review only when it carries a decision from a complete round: a row with no
+ * decision is a half-written or crashed round, PARTIAL and UNREADABLE are not verdicts, and one
+ * model is one opinion. The merge gate's completeRound is the same rule; a test compares them.
+ */
+function countsAsReview(row) {
+  if (!row.decision || typeof row.decision.action !== 'string') return false;
+  if (row.decision.reason === 'PARTIAL' || row.decision.reason === 'UNREADABLE') return false;
+  return readLegs(row) >= MIN_REVIEW_LEGS;
+}
+
+/** The set of contentHashes with a complete document row (see countsAsReview); ENOENT home = empty. */
+function reviewedHashes(ledgerHome, wanted = null) {
   let names;
   try {
     names = fs.readdirSync(ledgerHome).filter((f) => /^\d{4}-\d{2}\.ndjson$/.test(f));
@@ -151,16 +191,17 @@ function reviewedHashes(ledgerHome) {
   }
   const hashes = new Set();
   for (const name of names) {
+    if (Date.now() >= DEADLINE) throw budgetError();
     const text = fs.readFileSync(path.join(ledgerHome, name), 'utf8'); // an IO error here is DEGRADED
     for (const line of text.split('\n')) {
+      if (Date.now() >= DEADLINE) throw budgetError();
       if (!line.trim()) continue;
+      // Parse only lines naming a hash we need; a long ledger is mostly other rounds.
+      if (wanted && !wanted.some((h) => line.includes(h))) continue;
       let row;
       try { row = JSON.parse(line); } catch { continue; }
       if (!row || !row.artifact || row.artifact.kind !== 'document') continue;
-      // A row is a review only when it carries a decision from a complete round: a row with
-      // no decision is a half-written or crashed round, and PARTIAL is not a verdict.
-      if (!row.decision || typeof row.decision.action !== 'string') continue;
-      if (row.decision.reason === 'PARTIAL') continue;
+      if (!countsAsReview(row)) continue;
       if (typeof row.contentHash === 'string') hashes.add(row.contentHash);
     }
   }
@@ -249,7 +290,7 @@ async function main() {
     }
     const glass = breakGlass(root);
     if (glass) {
-      process.stderr.write(`${PREFIX} BREAK-GLASS: ${glass.path} is present (${glass.committed ? 'committed' : 'loose, untracked'}); the goal wall stands aside. Delete it to restore the wall.\n`);
+      banner(`${PREFIX} BREAK-GLASS: ${glass.path} is present (${glass.committed ? 'committed' : 'loose, untracked'}); the goal wall stands aside. Delete it to restore the wall.\n`);
       return;
     }
     const flagged = degraded ? flaggedGoals(root, goalsDir) : null;
@@ -260,17 +301,23 @@ async function main() {
         degraded = flagged.degraded;
       } else if (flagged.files.length) {
         flaggedFiles = flagged.files;
+        const hashed = [];
+        for (const rel of flagged.files) {
+          const h = hashGoal(root, rel);
+          if (h.degraded) { degraded = h.degraded; break; }
+          hashed.push({ rel, hash: h.hash });
+        }
         let reviewed;
-        try {
-          reviewed = reviewedHashes(ledgerHome);
-        } catch (e) {
-          degraded = `ledger at ${ledgerHome} could not be read: ${e.message}`;
+        if (!degraded) {
+          try {
+            reviewed = reviewedHashes(ledgerHome, hashed.map((h) => h.hash));
+          } catch (e) {
+            degraded = `ledger at ${ledgerHome} could not be read: ${e.message}`;
+          }
         }
         if (!degraded) {
-          for (const rel of flagged.files) {
-            const hashed = hashGoal(root, rel);
-            if (hashed.degraded) { degraded = hashed.degraded; break; }
-            if (!reviewed.hashes.has(hashed.hash)) unpaid.push({ rel, hash: hashed.hash, ledgerMissing: reviewed.missing });
+          for (const { rel, hash } of hashed) {
+            if (!reviewed.hashes.has(hash)) unpaid.push({ rel, hash, ledgerMissing: reviewed.missing });
           }
         }
       }
@@ -289,19 +336,19 @@ async function main() {
   const file = statePath(ledgerHome, sessionId);
   const state = readState(file);
   if (state === null) {
-    process.stderr.write(`${PREFIX} STAND-DOWN (UNVERIFIED): the wall's state file ${file} cannot be read, so bounded blocking is impossible this stop.${degraded ? ` Degraded: ${degraded}.` : ''}${goalsNote()} Fix the ledger home and re-run.\n`);
+    banner(`${PREFIX} STAND-DOWN (UNVERIFIED): the wall's state file ${file} cannot be read, so bounded blocking is impossible this stop.${degraded ? ` Degraded: ${degraded}.` : ''}${goalsNote()} Fix the ledger home and re-run.\n`);
     return;
   }
 
   const keys = degraded ? ['DEGRADED'] : unpaid.map((u) => `${u.rel}|${u.hash}`);
   const blockable = keys.filter((k) => (state[k] || 0) < MAX_BLOCKS);
   if (!blockable.length) {
-    process.stderr.write(`${PREFIX} STAND-DOWN after ${MAX_BLOCKS} blocks this session for: ${keys.join(', ')}.${degraded ? ` Still degraded: ${degraded}.` : ''}${goalsNote()}${unpaid.length ? ' These goals reach the reply UNREVIEWED.' : ''}\n`);
+    banner(`${PREFIX} STAND-DOWN after ${MAX_BLOCKS} blocks this session for: ${keys.join(', ')}.${degraded ? ` Still degraded: ${degraded}.` : ''}${goalsNote()}${unpaid.length ? ' These goals reach the reply UNREVIEWED.' : ''}\n`);
     return;
   }
   for (const k of blockable) state[k] = (state[k] || 0) + 1;
   if (!writeState(file, state)) {
-    process.stderr.write(`${PREFIX} STAND-DOWN (UNVERIFIED): the wall's state file ${file} cannot be written, so bounded blocking is impossible this stop.${degraded ? ` Degraded: ${degraded}.` : ''}${goalsNote()}\n`);
+    banner(`${PREFIX} STAND-DOWN (UNVERIFIED): the wall's state file ${file} cannot be written, so bounded blocking is impossible this stop.${degraded ? ` Degraded: ${degraded}.` : ''}${goalsNote()}\n`);
     return;
   }
 
@@ -324,9 +371,9 @@ if (require.main === module) {
     // Only the BRAKE itself can throw here (the check phase converts its own errors into a
     // degraded state above). A brake that cannot run cannot bound anything, so this stands
     // down loudly rather than block without a budget or exit 1 as a silent pass.
-    process.stderr.write(`${PREFIX} STAND-DOWN (UNVERIFIED): the wall's own brake failed: ${e && e.message ? e.message : e}\n`);
+    banner(`${PREFIX} STAND-DOWN (UNVERIFIED): the wall's own brake failed: ${e && e.message ? e.message : e}\n`);
     process.exitCode = 0;
   });
 }
 
-module.exports = { parseStatusZ, flaggedGoals, reviewedHashes, hashGoal, repoSlug, MAX_BLOCKS, GOALS_DIR, BREAK_GLASS };
+module.exports = { parseStatusZ, flaggedGoals, reviewedHashes, readLegs, countsAsReview, MIN_REVIEW_LEGS, hashGoal, repoSlug, MAX_BLOCKS, GOALS_DIR, BREAK_GLASS };

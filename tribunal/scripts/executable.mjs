@@ -33,6 +33,13 @@ export function resolveExe(cmd, { env = process.env, platform = process.platform
       if (isFile(js)) return found(execPath, [js]);
     }
   }
+  // xAI's installer puts grok in ~/.grok/bin and adds that to the user PATH, which a process
+  // started before the install does not see. Look there too, by the installer's own path.
+  const home = windows ? env.USERPROFILE : env.HOME;
+  if (cmd === "grok" && home) {
+    const installed = path.join(home, ".grok", "bin", windows ? "grok.exe" : "grok");
+    if (isFile(installed) && (windows || canExecute(installed))) return found(installed);
+  }
   // Preserve the runner's named spawn-error path; doctor uses found to report the lookup.
   return { file: cmd, prefix: [], found: false, searchedDirs };
 }

@@ -7,7 +7,7 @@
 //   Each model must read the artifact cold and blind to the other reviewers.
 //
 //   PER-LEG MINIMAL ENVIRONMENT. Each leg receives exactly the variables models.default.json lists for
-//   it and nothing else. The two agent runners read untrusted input and can hold a shell, so a
+//   it and nothing else. The agent runners read untrusted input and can hold a shell, so a
 //   spend-capable key never enters their environment. registry.mjs refuses a configuration
 //   that would break this; here it is enforced at the spawn.
 //
@@ -44,6 +44,32 @@ export const CODEX_DISABLED_FEATURES = [
   "tool_suggest",
   "skill_mcp_dependency_install",
 ];
+
+/**
+ * Every built-in Grok Build tool, removed by name. `--tools` cannot be the guard: an allowlist
+ * entry that names no tool leaves EVERY tool available (Grok Build 1.0.62 headless docs), so an
+ * empty allowlist is a full toolset. The isolation probe's guarded run is what proves this list.
+ */
+export const GROK_DISALLOWED_TOOLS = [
+  "run_terminal_cmd", "run_terminal_command", "read_file", "write", "search_replace", "list_dir", "grep",
+  "web_search", "web_fetch", "task", "Agent", "kill_command_or_subagent", "get_command_or_subagent_output",
+  "todo_write", "scheduler_create", "scheduler_delete", "scheduler_list", "monitor", "search_tool",
+  "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode", "ask_user_question", "send_feedback",
+  "image_gen", "image_edit", "image_to_video", "reference_to_video",
+];
+
+/** Replaces Grok Build's agent system prompt, which tells it to act on a codebase. */
+export const GROK_REVIEW_SYSTEM = "You are one independent reviewer on a code review panel. You have no tools. Review only the text you are given and answer in the format it asks for.";
+
+/** Set on every Grok leg: no self-update mid-panel (it would change the certified binary), no
+ * API-key login (only the plan sign-in may bill), no telemetry, trace upload or feedback. */
+export const GROK_FIXED_ENV = {
+  GROK_DISABLE_AUTOUPDATER: "1", GROK_DISABLE_API_KEY_AUTH: "1", GROK_TELEMETRY_ENABLED: "false",
+  GROK_TELEMETRY_TRACE_UPLOAD: "false", GROK_FEEDBACK_ENABLED: "false", DISABLE_ERROR_REPORTING: "1",
+};
+
+/** The home variables a Grok leg points at its own empty directory. */
+export const GROK_HOME_VARS = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"];
 
 export const DEFAULT_TIMEOUT_MS = 12 * 60 * 1000;
 
@@ -135,7 +161,7 @@ Rules: a finding is a hypothesis, so every one names how to check it. Do not res
  * credential when `requiredEnv` names something absent. Nothing outside the allowlist and
  * OS baseline reaches the process, keeping spend-capable keys away from agent legs.
  */
-export function envForLeg(leg, source = process.env) {
+export function envForLeg(leg, source = process.env, { home = null } = {}) {
   if (leg.runner === "openai-api") return openaiApiEnvironment(leg, source);
   const base = {};
   for (const k of ["PATH", "HOME", "USERPROFILE", "SystemRoot", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA", "ComSpec"]) {
@@ -146,7 +172,19 @@ export function envForLeg(leg, source = process.env) {
       base[k] = source.CODEX_HOME || join(source.USERPROFILE || source.HOME || "", ".codex");
       continue;
     }
+    if (k === "GROK_HOME") {
+      // The panel's OWN Grok sign-in, never the user's ~/.grok: that one carries their MCP
+      // servers, plugins and memory, and sharing its refresh token could log one of them out.
+      base[k] = source.TRIBUNAL_GROK_HOME || join(source.USERPROFILE || source.HOME || "", ".tribunal", "grok-home");
+      continue;
+    }
     if (source[k]) base[k] = source[k];
+  }
+  if (leg.runner === "grok-cli") {
+    Object.assign(base, GROK_FIXED_ENV);
+    // Grok Build also reads the user's ~/.claude rules, skills and MCP servers from HOME, even in
+    // headless mode. Point every home variable at the leg's own empty directory so it reads none.
+    if (home) for (const k of GROK_HOME_VARS) base[k] = home;
   }
   const missing = (leg.requiredEnv || []).filter((k) => !source[k]);
   return { env: base, missing };
@@ -194,6 +232,14 @@ export function argsForLeg(leg) {
       "exec", "-m", leg.id, "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
       ...CODEX_DISABLED_FEATURES.flatMap((f) => ["--disable", f]),
       "-",
+    ];
+  }
+  if (leg.runner === "grok-cli") {
+    return [
+      "-p", "-", "-m", leg.id, "--output-format", "json",
+      "--disallowed-tools", GROK_DISALLOWED_TOOLS.join(","),
+      "--disable-web-search", "--no-subagents", "--no-memory", "--no-plan", "--max-turns", "1",
+      "--system-prompt-override", GROK_REVIEW_SYSTEM,
     ];
   }
   throw new Error(`argsForLeg has no argv for runner "${leg.runner}"`);
@@ -431,23 +477,45 @@ export async function runOpenAIAPILeg(leg, userMessage, { sourceEnv = process.en
   }
 }
 
+/**
+ * Grok's `--output-format json` wraps the reply as { text, usage, ... }. Unwrap it so the findings
+ * parser reads the model's words, and keep the counts it reports. Anything that is not that
+ * wrapper passes through untouched, so a crash or refusal is classified on what was printed.
+ */
+export function unwrapGrokOutput(stdout) {
+  let parsed;
+  try { parsed = JSON.parse(String(stdout || "").trim()); } catch { return { stdout, usage: null }; }
+  if (!parsed || typeof parsed !== "object" || typeof parsed.text !== "string") return { stdout, usage: null };
+  const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const u = parsed.usage && typeof parsed.usage === "object" ? parsed.usage : {};
+  return { stdout: parsed.text, usage: { tokensIn: count(u.input_tokens), tokensOut: count(u.output_tokens),
+    tokensCached: count(u.cache_read_input_tokens) } };
+}
+
 export function runLeg(leg, userMessage, { timeoutMs, sourceEnv = process.env, spawnFn = spawn, mkTemp = () => mkdtemp(join(tmpdir(), "tribunal-leg-")) } = {}) {
   if (leg.runner === "genai-sdk") return runGeminiLeg(leg, userMessage);
   if (leg.runner === "openai-api") return runOpenAIAPILeg(leg, userMessage, { timeoutMs, sourceEnv, spawnFn });
   timeoutMs ??= DEFAULT_TIMEOUT_MS;
-  const { env, missing } = envForLeg(leg, sourceEnv);
+  const { missing } = envForLeg(leg, sourceEnv);
   if (missing.length) {
     return Promise.resolve(legResult(leg, { missingCredentials: missing }));
   }
+  const grok = leg.runner === "grok-cli";
   return mkTemp().then((cwd) => new Promise((resolve) => {
+    // The Grok leg's home variables point at this same fresh directory (see envForLeg).
+    const { env } = envForLeg(leg, sourceEnv, { home: grok ? cwd : null });
     // Remove each invocation's temporary directory to prevent accumulation during loops.
     // Cleanup is best-effort so a failed removal cannot delay or discard the review result.
     const done = (r) => {
       if (isOurTempDir(cwd)) rm(cwd, { recursive: true, force: true }).catch(() => {});
-      resolve(legResult(leg, { stdout: out, stderr: err, timeoutMs, ...r }));
+      if (!grok) { resolve(legResult(leg, { stdout: out, stderr: err, timeoutMs, ...r })); return; }
+      const unwrapped = unwrapGrokOutput(out);
+      resolve({ ...legResult(leg, { stdout: unwrapped.stdout, stderr: err, timeoutMs, ...r }),
+        tokensIn: unwrapped.usage?.tokensIn ?? null, tokensOut: unwrapped.usage?.tokensOut ?? null,
+        tokensCached: unwrapped.usage?.tokensCached ?? null });
     };
     let out = "", err = "", settled = false, child;
-    const { file, prefix } = resolveExe(leg.runner === "claude-cli" ? "claude" : "codex");
+    const { file, prefix } = resolveExe(leg.runner === "claude-cli" ? "claude" : grok ? "grok" : "codex");
     try {
       child = spawnFn(file, [...prefix, ...argsForLeg(leg)], { cwd, env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {

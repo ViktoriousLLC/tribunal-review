@@ -1,7 +1,7 @@
 {
   "name": "tribunal-review",
   "displayName": "Tribunal Review",
-  "version": "0.9.0",
+  "version": "0.10.3",
   "description": "Cross-model review panel: reviews PRs, files, goal statements and pasted text on the Claude and ChatGPT subscriptions you already hold, with an enforced convergence loop and honest cost reporting.",
   "author": {
     "name": "Viktorious LLC"

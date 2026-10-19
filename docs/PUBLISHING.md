@@ -16,8 +16,10 @@ Older versions: `/plugin marketplace add ViktoriousLLC/tribunal-review`, then `/
 
 The review command is `/tribunal-review:review <file | PR number>`.
 
-Every release: bump `version` in `tribunal/.claude-plugin/plugin.json` AND `tribunal/package.json`
-(keep them equal), add the CHANGELOG entry, commit, then tag both ways and push:
+Every release: if it touches the hooks, policy or the ledger row shape, run the break-it pass in
+`docs/BREAK-IT.md` first and act on its report. Then bump `version` in
+`tribunal/.claude-plugin/plugin.json` AND `tribunal/package.json` (keep them equal), add the
+CHANGELOG entry, commit, then tag both ways and push:
 
 ```text
 git tag -a v0.9.0 -m "v0.9.0: ..."          # the repository's own release tag
