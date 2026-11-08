@@ -87,9 +87,9 @@ test("the shipped models.default.json loads and validates", () => {
   assert.ok(legs.length >= 5, "expected at least the five panel legs");
   // Pin model IDs beside seat names: a row can keep its name while selecting the wrong
   // model, so checking names alone cannot verify the intended panel composition.
-  assert.deepEqual(legs.map((l) => l.leg), ["opus", "fable", "sol", "astra", "gemini"]);
+  assert.deepEqual(legs.map((l) => l.leg), ["opus", "fable", "sol", "astra", "gemini", "antigravity"]);
   assert.deepEqual(legs.map((l) => l.id), [
-    "claude-opus-5", "claude-fable-5", "gpt-5.6-sol", "gpt-6-astra", "gemini-3.8-flash",
+    "opus", "fable", "gpt-5.6-sol", "gpt-6-astra", "gemini-3.8-flash", "gemini-4-argon-medium",
   ], "a leg must run the model its name says it runs");
 });
 

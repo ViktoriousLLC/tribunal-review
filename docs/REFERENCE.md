@@ -19,6 +19,26 @@ node "<installed-plugin-root>/scripts/doctor.mjs"          which seats work on t
 node "<installed-plugin-root>/scripts/isolationProbe.mjs"  measure the reviewer boundary by hand
 ```
 
+## Model versions and effort
+
+Claude seats use CLI aliases (`opus`, `fable`), which the Claude CLI resolves to its newest
+model. Codex seats keep a pinned `id` and may declare `family` (for example, `sol` or
+`astra`). Tribunal selects the highest numeric version in that family from
+`$CODEX_HOME/models_cache.json` (default `~/.codex`), excluding hidden models. If the
+installed Codex CLI is older than the list's `client_version`, it keeps the pin and prints
+an upgrade notice when a different model is available. Missing or unreadable cache/version
+information also keeps the pin and prints a notice. Two enabled seats never resolve onto one
+model: a family seat takes the newest model no other seat holds. Every Codex client on the
+machine rewrites that list for its own version, so when two Codex versions are installed the
+chosen model can change from one review to the next; the printed model is what ran.
+
+No effort override is sent by default. Set a leg's optional `effort` to `low`, `medium`,
+`high`, `xhigh`, `max`, or `ultra` to override it; the vendor CLI decides which levels its
+model supports. Status lines and the review footer show the answering model and effort,
+labelled as set or model default (including Codex's default level when the cache reports
+it). Each ledger leg banks the answering `model` and displayed `effort`. Claude's JSON
+reply supplies its actual model identity, including for the judge.
+
 ## Per-repository configuration
 
 The runner walks upward from the working directory to a `.git` marker, falling back to the
@@ -234,6 +254,18 @@ against the code before fixing them, then verify the fix landed before spending 
   non-zero. PARTIAL is never QUIET and cannot satisfy the stop rule.
 - An actionable title seen in at least three rows produces a **RECURRING FINDING (channel
   signal)** block with round numbers, in both human and JSON output.
+- When this round and the previous round (`runnerRound` minus one) of the same artifact both
+  have actionable findings on one **mechanism**, a **STOP PATCHING: <mechanism>** block names
+  both rounds, what each found, and the three choices: cut it (revert), redesign it once (only
+  if that removes machinery), or ship it behind an off-by-default switch. A `Next:` line that
+  would say CONTINUE says STOP PATCHING instead and still names the unchanged verdict. It is
+  advice: no decision, count, gate or exit code changes. The row banks `stopPatching` as
+  `[{ mechanism, rounds }]`; JSON output adds `stopPatching` and `stopPatchingSignal`. The
+  mechanism key is the finding's `file`, normalised (slashes, a leading `./`, a trailing
+  `:line`, case, a diff's `a/` or `b/` side prefix), with a path-suffix match so `src/x.js` and `x.js` agree; a placeholder such as `N/A` is no file. The finding contract
+  has no function field, and the spiral this catches is a new title each round, so a title key
+  would miss it. In a single-file review every finding names that file, so there the block
+  means "this file drew findings twice running"; a finding with no file never signals.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -254,6 +286,175 @@ removing that one lock file and retrying. An override does not bypass the lock o
 Artifact identity is its PR number or its kind and source. Content identity is the PR head
 SHA, file SHA-256, or stdin SHA-256. A QUIET panel only judges the artifact it saw: execute
 the relevant behavior to detect drift, unexecuted features, and unreachable controls.
+
+### Blinded judge (trial)
+
+After each local panel round with single-model findings, the judge makes one extra Claude CLI
+call. It prefers the enabled, non-advisory `opus` seat, otherwise the first enabled,
+non-advisory Claude CLI seat. It reads the same artifact message as the reviewers and only
+the non-nit findings raised by exactly one reviewer, with reviewer identities removed, then annotates
+each with keep or likely false positive and a reason.
+
+This is annotation only: it changes no findings, actionable count, decision, proof, exit code,
+or gate. It fails open on an unavailable leg, failed or unparseable reply, or any other judge
+error. The ledger's `judge` field records whether it ran, its model or skip reason, and, when
+it ran, counts and, per finding, its id, title, the seat that raised it, the verdict and the
+reason. Only a seat that answered this round can judge, the judge is skipped when fewer than
+two reviewers answered (every finding would be "lone" and self-judged), and its call has a
+five-minute timeout. The judge is usually the same model as
+one of the reviewers: it is blinded, not independent, so the ledger keeps the raising seat to
+let the trial measure whether it favours its own findings. Its call is one plan-covered Claude
+CLI call and is not in the metered cost line. It is on by default; set `"judge": false` in
+`tribunal.config.json` or pass `--no-judge` to turn it off.
+
+## PR scorecard
+
+From the reviewed repository, inspect a PR's cumulative results:
+
+```text
+node "<installed-plugin-root>/scripts/scorecard.mjs" --pr 123
+node "<installed-plugin-root>/scripts/scorecard.mjs" --pr 123 --json
+node "<installed-plugin-root>/scripts/scorecard.mjs" --pr 123 --mark "P1:real:Added the missing ownership check" --mark "P2:not-real:The caller already validates this"
+node "<installed-plugin-root>/scripts/scorecard.mjs" --pr 123 --mark "P3:duplicate=P1:Same underlying defect" --mark "P4:unsure"
+```
+
+**Total** is the sum of counted reviewers' findings across complete rounds. **Unique** is
+the number of problems matched across those rounds using the panel's file/title similarity
+rule. Problems are assigned `P<n>` IDs in monthly file name and append order, so backdated
+timestamps in later rows do not change existing IDs. **Real** means a
+code change was made because of that problem. Mark it real only after making that change;
+`not-real` and `duplicate=P<n>` require a reason. `unsure` records an unresolved judgment.
+Marks are repeatable arguments; the latest appended mark for an ID wins. A duplicate folds
+its reviewer credit and Judge evidence into the target problem, whose mark decides whether
+it is real. Duplicate chains are allowed; new marks with cycles or unknown IDs are refused
+with exit 4. Stored duplicates with missing targets or cycles stay unfolded and unmarked,
+with a warning. Invalid stored marks do not prevent corrections or marking other problems.
+
+The table shows each reviewer seat, the model IDs seen, total findings, unique problems,
+problems found by that seat alone, and real/not-real counts. PARTIAL and UNREADABLE rounds
+are skipped and reported. Finding lists start with v0.13 rounds; older rounds still contribute
+to total findings, with a `unique: not recorded` note. No old findings are reconstructed.
+Every banked run prints a short cumulative scorecard line.
+
+The Judge check compares its keep/demote annotations with operator marks: demoted-but-real
+(Judge wrong), kept-but-not-real, demoted-and-not-real, kept-and-real, and unmarked/unsure.
+A problem counts once per verdict type; a problem kept in one round and demoted in another
+can appear in both relevant categories. Judge annotations do not decide operator marks.
+
+Marks live in the resolved `<ledgerHome>/marks.ndjson`, append-only and scoped to the
+artifact key. Appends start a new line even after an incomplete final row. Stored verdicts
+other than `real`, `not-real`, `unsure`, or `duplicate:P<n>` (positive IDs) are ignored.
+New marks include the current problem title. If a stored title differs from
+the current title, the mark still applies and a warning asks you to re-mark it. Warnings
+appear before the unmarked problems. Monthly review history and the gates ignore that file. The scorecard uses the
+same repository policy and ledger path as `run.mjs`. Use `--file <path>` with the exact path
+used for review, or `--source <kind:source>` for another artifact (for example,
+`--source document:null` for stdin). The running line prints the exact artifact key.
+`--source` splits at the first colon when the prefix is two or more lowercase letters (so a
+bare `c:\notes\a.md` stays a path); otherwise a bare `--source <s>` addresses `document:<s>`.
+The printed selector uses single quotes (`--source '<key>'`), which keep paths and `$()`
+literal in PowerShell and bash. A key containing a single quote or newline instead prints
+`(the key contains a quote, so type its selector by hand)` without a pasteable selector.
+A key with no recorded rounds says so instead of printing an empty table.
+After marking, the command prints the refreshed scorecard; normal exit is 0.
+
+Vendor rate limits get one retry after a 60-second base delay plus random jitter of less
+than 25% of that delay, for every runner. Set `TRIBUNAL_RATE_LIMIT_RETRY_MS` to override
+the base delay in milliseconds; empty or whitespace values use the default. The log shows
+the actual wait rounded to whole seconds (fractional seconds for waits below one second).
+Responses containing `insufficient_quota` are failures and are not retried. A second rate limit
+keeps the round incomplete and asks the operator to wait a few minutes before running again.
+Gemini tries its fallback model after a 429 because that model has its own quota. Only a
+ladder where every rung failed with 429 and none mentioned `insufficient_quota` gets this retry;
+mixed failures retain the error listing every failed rung.
+
+Before classifying any CLI reply, the runner removes stderr lines matching the prompt or
+contract (normalizing CRLF, trimming lines, and ignoring empty prompt lines). Only this
+filtered stderr supplies classification and error details. A rate limit requires a nonzero
+exit and no timeout; Claude `is_error` envelopes count as failed exits. The LAST remaining
+stderr line starting with an error marker (`ERROR`, `Error`, `API Error`, optionally after a
+timestamp) must name 429. Alternatively, trimmed stdout of at most 256 bytes must start with
+a refusal (`API Error: 429`, a rate-limit phrase, or `too many requests`, optionally prefixed
+with `error:` for the latter phrases), or its last error line must name 429. Ordinary review
+prose mentioning rate limits does not count. A failure matching nothing known stays
+`unrecognised`; its last filtered error line is redacted before truncation to 160 characters.
+
+## Gemini on a Google AI Pro plan (the Antigravity seat)
+
+The `agy-cli` runner reviews through Google's Antigravity CLI (`agy`) signed in with a Google AI
+Pro account, so a Gemini review costs nothing beyond the subscription. It runs on Windows only
+(see below). The shipped
+`antigravity` row is a disabled template; enable it in `tribunal.config.json` on a machine where
+`agy` is installed and you have signed in once by running `agy`.
+
+What keeps it on the plan:
+
+- **No key can reach it.** agy also signs in from `GEMINI_API_KEY` (with no prompt) and from a
+  service account or Application Default Credentials, all metered. The seat's environment is the
+  OS baseline only, and every name in `AGY_FORBIDDEN_ENV` is removed, in any letter case. The
+  registry refuses an `agy-cli` row with `envKeys`, `requiredEnv`, or billing other than `plan`.
+- **No paid overflow.** Each run passes `--settings` with `useG1Credits: false` (agy's "Use AI
+  Credits" switch, which pays a used-up allowance from purchased credits). This is a per-run
+  setting; nothing here has watched an allowance run out, so it is the switch set, not a measured
+  refusal.
+- **A used-up allowance is a named not-run**: `Google AI Pro allowance used up; waits for the
+  reset (the paid key is never used instead)`, matched on agy's own wording ("Your AI credits
+  balance is too low to continue.", a weekly, daily, 7-day or 5-hour limit). A missing sign-in is
+  a named not-run when agy says so in its result. Neither falls back to the metered Gemini runner.
+  A per-minute limit (429, RESOURCE_EXHAUSTED, "quota") is a rate limit like any other seat's and
+  is retried once.
+- **On Windows the seat runs in its own empty home.** agy keeps the plan sign-in in the Windows
+  credential store: with HOME, USERPROFILE, APPDATA and LOCALAPPDATA pointed at an empty folder it
+  still answered on the account (measured 2026-10-30). So your agy hooks, saved settings, `.env`
+  files, a gcloud Application Default Credentials file and anything a run schedules stay out of
+  it, and the folder is deleted afterwards. agy really does use that folder: it built its whole
+  profile (`.gemini/antigravity-cli`, conversations, caches) inside it, and no `config/hooks.json`
+  was there to run. **The seat runs only on Windows.** On macOS and Linux
+  the sign-in may be a file in the home, so an empty home might break it and the real home would
+  let those files reach it; until that is measured the policy turns the seat off there and names
+  why.
+- Also measured 2026-10-30, signed in: an invalid `GEMINI_API_KEY` in the environment, in a
+  workspace `.env` or in `.gemini/.env` did not displace the sign-in. The stripping is for the day
+  the sign-in lapses.
+
+What keeps it a reviewer:
+
+- The prompt goes in as one stream-json message on stdin (agy's print mode does not read plain
+  stdin, and argv cannot hold a large diff). A 334 KB message was accepted whole (187,267 input
+  tokens, 2026-10-30). The reply is the `response` of the last `result`
+  event. A `result` with status `ERROR` is never an answer, even when agy exits 0, and neither is
+  a `SUCCESS` whose `finished_reason` is anything but absent (agy's normal finish) or a plain stop:
+  `max_tokens`, a timeout, `SAFETY` or an unknown reason may have cut the findings short.
+- The same `--settings` deny `command`, `write_file`, `read_file`, `read_url`, `execute_url`,
+  `mcp` and `unsandboxed` for every target. The `read_file` rule matters: without it agy read a
+  file outside its workspace in a test on 2026-10-30. With the rules on, a request to grep, list
+  or find files outside the workspace got no search tool at all, and its shell and read_file
+  attempts were refused (same day). The isolation probe certifies this seat
+  like the other CLI seats (`isolationProbe.mjs --leg agy`); its control drops the deny list but
+  keeps `useG1Credits: false`, so probing never spends credits either.
+- Not covered by those rules: agy's web search runs when a prompt asks for it, and no deny rule
+  reaches it (`search_web(*)`, `web_search(*)` and `tool(search_web)` were all tried 2026-10-30).
+  An instruction hidden in a reviewed artifact can therefore send text from that artifact to Google
+  Search as a query. Its `schedule` tool also runs and `schedule(*)` does not deny it either
+  (tried 2026-10-30). In that test the task was one of agy's own background tasks inside the run,
+  with its log under agy's profile folder (which on Windows is the seat's own home), and the run
+  still ended normally. Whether a scheduled task can outlive the process was not tested. Removal is best-effort: if a file is
+  still locked, that folder (which holds agy's copy of the conversation) can stay under the temp
+  directory. Doctor prints the web-search caveat on the
+  seat's line, and the isolation probe's PASS covers file reads only. A probe run that agy
+  refused (an `ERROR` result) or that stopped early is recorded as UNKNOWN, never as a run that
+  did not leak.
+
+- What is not measured: how a machine where agy was never signed in behaves (it may wait on a
+  browser sign-in until the leg's timeout rather than answer with an error), and what agy says
+  when the allowance runs out beyond "Your AI credits balance is too low to continue.". Billing
+  also follows the Google account agy is signed in with: sign in with the AI Pro account, not a
+  Workspace or Code Assist account billed to a Cloud project.
+- An `id` that agy does not offer (`agy models` lists them) gets one run on the row's `fallback`,
+  and the panel prints the usual DEMOTED warning.
+
+It cannot run on a CI machine: agy has no plan sign-in for a machine nobody is sitting at, and its
+headless sign-ins are the metered ones above.
 
 ## Accounts and credentials
 

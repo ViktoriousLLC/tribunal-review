@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { runnableLegs } from "./registry.mjs";
+import { codexCliVersion, resolveCodexFamilies, claudeEffortShown } from "./modelFamilies.mjs";
 import { isRecordableRound } from "./panelLogic.mjs";
 
 /** Require enough independent reviewers for a local PR review proof. */
@@ -27,7 +28,11 @@ import { runLeg, classifyLegOutcome } from "./legRunner.mjs";
 import { fromFile, fromText, fromPr, buildUserMessage, GH_MISSING_MESSAGE } from "./artifact.mjs";
 import { clusterFindings, summariseRound, loopDecision, soleFindsByLeg, trendLine } from "./panelLogic.mjs";
 import { render } from "./render.mjs";
+import { runJudge, pickJudgeLeg, loneFindings } from "./judge.mjs";
 import { resolvePolicy } from "./policy.mjs";
+import { artifactKey, artifactHistory } from "./ledger.mjs";
+export { artifactKey, artifactHistory } from "./ledger.mjs";
+import { buildScorecard, readMarks, scorecardRunningLine } from "./scorecard.mjs";
 import { cliCommand, enabledCliLegs, measureCliBinding } from "./isolationBinding.mjs";
 import { runProbe } from "./isolationProbe.mjs";
 
@@ -210,26 +215,13 @@ function buildArtifact() {
   throw new Error("give the panel something to read: --file <path>, --pr <n>, or --stdin");
 }
 
-/** Artifact identity deliberately ignores content: fixes stay in the same convergence loop. */
-export function artifactKey(artifact) {
-  return artifact.prNumber != null ? `pr:${artifact.prNumber}` : `${artifact.kind}:${artifact.source}`;
-}
-
-export function artifactHistory(artifact, ledgerHome) {
-  let files;
-  try { files = readdirNative(ledgerHome).filter((f) => /^\d{4}-\d{2}\.ndjson$/.test(f)).sort(); }
-  catch (e) { if (e.code === "ENOENT") return []; throw e; }
-  const rows = [];
-  for (const file of files) {
-    for (const line of readFileSync(join(ledgerHome, file), "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const row = JSON.parse(line);
-        if (row.artifact && artifactKey(row.artifact) === artifactKey(artifact)) rows.push(row);
-      } catch { /* Tolerate a half-written final ledger line. */ }
-    }
-  }
-  return rows;
+/** The Judge numbers only lone non-nits; retain that join separately from cluster order. */
+export function findingList(clusters) {
+  const judgeIds = new Map(loneFindings(clusters).map(({ id, cluster }) => [cluster, id]));
+  return clusters.map(({ title, severity, category, file, line, foundBy }, index) => ({
+    id: `F${index + 1}`, title, severity, category, file, line, foundBy,
+    judgeId: judgeIds.get(clusters[index]) ?? null,
+  }));
 }
 
 export function previousRoundActionable(artifact, round, ledgerHome) {
@@ -252,6 +244,84 @@ export function recurringFindings(rows) {
   return [...titles].filter(([, rounds]) => rounds.length >= 3).map(([title, rounds]) => ({
     channel: "signal", label: "RECURRING FINDING", title, rounds,
   }));
+}
+
+/**
+ * The MECHANISM a finding is about, as a key two rounds can share: the finding's `file`.
+ *
+ * Legs answer the finding contract (title, severity, category, file, line, why, check), so no
+ * function name exists to key on, and a model's line number drifts as fixes add code. A title
+ * stem cannot be the key either: the spiral this detects is each round finding a NEW spelling
+ * of the same problem, so its titles differ by construction (an exact repeat is already the
+ * RECURRING FINDING block). The file is the one field the legs fill reliably that stays put
+ * while the instances change. Its known coarseness: in a single-file review every finding
+ * names that one file, so there the key means "this file", and the block says so.
+ * Normalised so `./a\b.js:12` and `a/b.js` are one key; a finding with no file, or a placeholder
+ * such as "N/A" where a file would go, has none.
+ */
+export function mechanismKey(finding) {
+  const file = mechanismName(finding).toLowerCase();
+  return file && !PLACEHOLDER_FILE.test(file) ? file : null;
+}
+
+/**
+ * What legs write in `file` when a finding has no file: reviews of goals, plans and pasted text
+ * fill it with "N/A", "-", "multiple" and the like. Two rounds of placeholders are not one
+ * mechanism, and nor is a phrase with neither a slash nor a dot (an artifact title, a sentence);
+ * a real path with a space in it, such as `src/My Component.js`, keeps its key.
+ */
+const PLACEHOLDER_FILE = /^(?:null|none|\(none\)|n\/?a|-+|multiple|various|several|unknown|general|global|all|any|everywhere)$|^[^/.]*\s[^/.]*$/;
+
+/** The same normalisation with case kept, for printing. A diff's `a/` or `b/` side prefix is dropped. */
+function mechanismName(finding) {
+  return String(finding?.file ?? "").trim().replace(/\\/g, "/")
+    .replace(/:\d+(?:[-:]\d+)?$/, "").replace(/^(?:\.\/)+/, "").replace(/^[ab]\/(?=.)/, "");
+}
+
+/** One key names the same file as another when they are equal or one is a path suffix of the other. */
+function sameMechanism(a, b) {
+  return a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+}
+
+/**
+ * STOP PATCHING: this round and the previous round of the same artifact both drew actionable
+ * findings on one mechanism. Advice like RECURRING FINDING: it changes no verdict, count, gate
+ * or exit code. Only the `Next:` line changes, and only when it would have said CONTINUE.
+ */
+export function stopPatchingSignals(previousRow, currentActionable, round) {
+  if (!previousRow || !Number.isSafeInteger(round)) return [];
+  const previousRound = previousRow.runnerRound ?? previousRow.round;
+  const byKey = (findings) => {
+    const keys = [];
+    for (const finding of findings || []) {
+      const key = mechanismKey(finding);
+      if (!key) continue;
+      let entry = keys.find((k) => sameMechanism(k.key, key));
+      if (!entry) keys.push(entry = { key, file: mechanismName(finding), titles: [] });
+      if (!entry.titles.includes(finding.title)) entry.titles.push(finding.title);
+    }
+    return keys;
+  };
+  const before = byKey(previousRow.actionableFindings);
+  return byKey(currentActionable).flatMap((now) => {
+    const then = before.find((k) => sameMechanism(k.key, now.key));
+    return then ? [{ channel: "signal", label: "STOP PATCHING", mechanism: now.file,
+      rounds: [previousRound, round], titles: { [previousRound]: then.titles, [round]: now.titles } }] : [];
+  });
+}
+
+/** The printed block: both rounds, what each found, and the three choices. */
+export function renderStopPatching(signals) {
+  return signals.map(({ mechanism, rounds: [previous, current], titles }) => [
+    `STOP PATCHING: ${mechanism}`,
+    `Rounds ${previous} and ${current} both drew actionable findings on this mechanism (key: the finding's file).`,
+    `  Round ${previous}: ${titles[previous].join("; ")}`,
+    `  Round ${current}: ${titles[current].join("; ")}`,
+    "Two rounds running on one mechanism means the next fix is probably another instance. Choose one, in writing, before another round:",
+    "  1. Cut it: revert the mechanism.",
+    "  2. Redesign it once, and only if the redesign REMOVES machinery.",
+    "  3. Ship it behind a switch that is off by default.",
+  ].join("\n")).join("\n\n");
 }
 
 /** Bank every round, append-only, so convergence and cost checks retain their evidence. */
@@ -313,7 +383,9 @@ export function panelRound(results, clusters, options = {}) {
  * not hide an unavailable primary behind the footer.
  */
 export function demotionWarnings(results, registry) {
-  const primaryOf = Object.fromEntries((registry || []).map((l) => [l.leg, l.id]));
+  // Only a runner that dispatches a fallback rung can be demoted. A Claude CLI seat names an alias
+  // ("opus") and reports the concrete model it resolved to, so comparing the two would always differ.
+  const primaryOf = Object.fromEntries((registry || []).filter((l) => l.fallback && l.runner !== "claude-cli").map((l) => [l.leg, l.id]));
   return results
     .filter((r) => r.kind === "answered" && r.model && primaryOf[r.leg] && r.model !== primaryOf[r.leg])
     .map((r) => `[panel] ${r.leg} DEMOTED: primary rung ${primaryOf[r.leg]} did not answer; ${r.model} answered in its place. Fix or re-pin the primary before trusting this seat's tier.`);
@@ -324,6 +396,7 @@ export function panelStatus(results) {
   const read = remaining.filter((r) => r.kind !== "failed" && r.answered && !r.parseFailed);
   return [
     `[panel] ${remaining.length} leg(s) remain, ${read.length} read. Proof requires at least ${MIN_PROOF_LEGS}.`,
+    ...results.filter((r) => r.kind !== "not-run").map((r) => `[panel] ${r.leg}: ${r.model ?? "unknown model"} · effort ${r.effortShown || "model default"}`),
     ...results.filter((r) => r.kind === "not-run").map((r) => `[panel] ${r.leg} not run: ${r.reason}`),
     ...results.filter((r) => r.kind === "failed").map((r) => `[panel] ${r.leg} failed: ${r.reason}`),
   ].join("\n");
@@ -448,7 +521,7 @@ export function postLocalProof(artifact, round, elapsedMs, results, repo, spawn 
   return body;
 }
 
-export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runProbe, policyOptions = {} } = {}) {
+export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runProbe, policyOptions = {}, modelOptions = {} } = {}) {
   if (process.argv.some((value) => value === "--round" || value.startsWith("--round="))) {
     console.error("Tribunal refused: --round is removed; runnerRound is assigned by the runner.");
     process.exitCode = 4;
@@ -462,6 +535,11 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
   }
   const policy = resolvePolicy(process.cwd(), policyOptions);
   if (flag("print-policy")) { console.log(JSON.stringify(policy, null, 2)); return; }
+  const versionNow = policy.registry.some((leg) => leg.enabled && leg.runner === "codex-cli" && leg.family)
+    ? codexCliVersion(modelOptions.spawnSyncFn) : null;
+  const all = resolveCodexFamilies(policy.registry, { codexVersion: versionNow, ...modelOptions });
+  policy.registry = all;
+  for (const leg of all) if (leg.notice && leg.enabled) console.error(`[models] ${leg.leg}: ${leg.notice}`);
   // --no-auto-probe keeps the strict behaviour: a missing or stale measurement refuses (exit 5)
   // and names the re-probe command, for operators who want the probe to be a deliberate step.
   const gate = await admitPanel(policy, { probeOptions, probe: flag("no-auto-probe") ? null : probe });
@@ -471,7 +549,6 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
     return;
   }
 
-  const all = policy.registry;
   for (const leg of all.filter((l) => l.skippedNotInstalled)) console.error(`[panel] ${leg.leg}: ${leg.disabledReason}`);
   const { run: legs, credentialAbsent, trustRefused = [] } = runnableLegs(all);
   const disabled = all
@@ -507,7 +584,8 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
       return;
     }
     const round = 1 + Math.max(0, ...history.map((row) => Number.isSafeInteger(row.runnerRound) ? row.runnerRound : 0));
-    const message = `${readFileSync(policy.reviewerPromptPath, "utf8")}\n\n${buildUserMessage(artifact)}`;
+    const artifactMessage = buildUserMessage(artifact);
+    const message = `${readFileSync(policy.reviewerPromptPath, "utf8")}\n\n${artifactMessage}`;
 
     const started = Date.now();
     // Run legs in parallel for speed, each in its own directory to prevent CLI conversation
@@ -523,6 +601,12 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
         kind: "not-run", reason, answered: false, error: `not run: ${reason}`,
         findings: [], raw: "", parseFailed: false })),
     ];
+    for (const result of allResults) {
+      const seat = all.find((leg) => leg.leg === result.leg);
+      // A Claude seat's level is known only once the answering model is (the CLI does not report it).
+      result.effortShown = seat?.runner === "claude-cli" ? claudeEffortShown(result.model, seat.effort)
+        : seat?.effortShown || "model default";
+    }
     const elapsedMs = Date.now() - started;
     // Everything below reads only the seats that count; advisory seats are reported beside it.
     const { counted: results, advisory } = splitAdvisory(allResults, all);
@@ -546,6 +630,16 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
       stillPresent: previousActionable.slice(0, Math.min(stillPresentCount, previousActionable.length)),
     });
 
+    // Only a seat that answered this round may judge, so an unusable seat never costs a timeout.
+    const answeredSeats = all.filter((leg) => results.some((r) => r.leg === leg.leg && r.kind === "answered"));
+    const judge = await runJudge({ clusters, artifactMessage, registry: answeredSeats, reviewLeg,
+      answered: results.filter((r) => r.kind === "answered" && !r.parseFailed).length,
+      enabled: policy.judge !== false && !flag("no-judge") });
+    if (judge.model) judge.effortShown = claudeEffortShown(judge.model, pickJudgeLeg(answeredSeats)?.effort);
+    if (judge.ran) console.error(`[judge] ${judge.model} (effort ${judge.effortShown}): ${judge.kept} keep, ${judge.demoted} demote, ${judge.unjudged} not judged of ${judge.total} single-model finding(s)`);
+    const previousRow = history.filter((row) => (row.runnerRound ?? row.round) === round - 1).at(-1);
+    const stopPatching = stopPatchingSignals(previousRow, summary.actionable, round);
+
     const record = {
       ts: new Date().toISOString(),
       artifact: { kind: artifact.kind, source: artifact.source, title: artifact.title, chars: artifact.text.length, prNumber: artifact.prNumber ?? null, headSha: artifact.headSha ?? null },
@@ -556,6 +650,7 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
       elapsedMs,
       legs: results.map((r) => ({ leg: r.leg, model: r.model, answered: r.answered, error: r.error,
         kind: r.kind, reason: r.reason, parseFailed: r.parseFailed, shortUnrecognised: Boolean(r.shortUnrecognised),
+        effort: r.effortShown,
         findings: r.findings?.length ?? 0 })),
       // A 4-leg pass must be distinguishable from a 5-leg pass in the LEDGER, not only in the
       // rendered comment: name every enabled-or-known leg that did not run, with its reason.
@@ -563,15 +658,22 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
       legsRemaining: remaining.length,
       warnings,
       clusters: clusters.length,
+      findingList: findingList(clusters),
       actionable: summary.actionableCount,
       // Banked so the next round can re-verify them. Without this the REDO path has nothing to
       // compare against and the loop can never notice a fix that did not land.
       actionableFindings: summary.actionable.map((f) => ({ title: f.title, file: f.file, severity: f.severity, category: f.category, foundBy: f.foundBy })),
       soleFinds: soleFindsByLeg(clusters),
+      judge: { ran: judge.ran, model: judge.model ?? null, reason: judge.reason ?? null,
+        ...(judge.ran ? { total: judge.total, kept: judge.kept, demoted: judge.demoted, unjudged: judge.unjudged,
+          verdicts: judge.verdicts.map(({ id, title, by, verdict, why }) => ({ id, title, by, verdict, why })) } : {}) },
       // Banked apart from `legs` so no gate that counts legs ever counts an advisory seat.
       advisory: advisory.map((r) => ({ leg: r.leg, model: r.model, kind: r.kind, error: r.error,
+        effort: r.effortShown,
         findings: (r.findings || []).map((f) => ({ title: f?.title, severity: f?.severity, file: f?.file ?? null })) })),
       decision: { action: decision.action, reason: decision.reason },
+      // Advice, banked beside the unchanged decision so a later reader sees what was advised.
+      stopPatching: stopPatching.map(({ mechanism, rounds }) => ({ mechanism, rounds })),
       // Bank measured cost so metered legs cannot inherit an unconditional zero. A leg whose
       // runner reports no usage remains null ("not reported"), because silence is not free.
       metered: meteredSummary(allResults, all),
@@ -579,6 +681,11 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
     const countedMetered = meteredSummary(results, all);
     const recurrence = recurringFindings([...history, record]);
     const bankError = bank(record, policy.ledgerHome);
+    try {
+      if (bankError) throw new Error(bankError);
+      const card = buildScorecard(artifactHistory(artifact, policy.ledgerHome), readMarks(policy.ledgerHome, artifactKey(artifact)));
+      console.error(scorecardRunningLine(card, artifact));
+    } catch (error) { console.error(`[scorecard] unavailable: ${error.message}`); }
     // A proof certifies that a complete, parseable panel reviewed this commit; it can include
     // actionable findings. Requiring QUIET would hide completed reviews that found defects.
     // A panel that lost a leg or that nobody could parse cannot produce proof.
@@ -593,9 +700,11 @@ export async function main({ reviewLeg = runLeg, probeOptions = {}, probe = runP
     const preview = !postProof && proof ? proof : null;
 
     const signal = recurrence.map((finding) => `RECURRING FINDING (channel signal)\n${finding.title}\nRounds: ${finding.rounds.join(", ")}`).join("\n\n");
-    const out = [status, ...warnings, ...(signal ? ["", signal] : []), "", render({ artifact, clusters, summary, decision,
-      legs: remaining, round, elapsedMs, disabled, metered: countedMetered }), ...(advisory.length ? [renderAdvisory(advisory)] : []), ...(preview ? ["", preview] : [])].join("\n");
-    const text = flag("json") ? JSON.stringify({ record, clusters, summary, decision, recurrence, recurrenceSignal: signal || null,
+    const stopSignal = renderStopPatching(stopPatching);
+    const out = [status, ...warnings, ...(signal ? ["", signal] : []), ...(stopSignal ? ["", stopSignal] : []), "", render({ artifact, clusters, summary, decision,
+      legs: remaining, round, elapsedMs, disabled, metered: countedMetered, judge, stopPatching }), ...(advisory.length ? [renderAdvisory(advisory)] : []), ...(preview ? ["", preview] : [])].join("\n");
+    const text = flag("json") ? JSON.stringify({ record, clusters, summary, decision, judge, recurrence, recurrenceSignal: signal || null,
+      stopPatching, stopPatchingSignal: stopSignal || null,
       ...(preview ? { proof: preview } : {}) }, null, 2) : out;
     const dest = arg("out");
     if (dest) {

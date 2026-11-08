@@ -17,7 +17,7 @@ const codex = { leg: "sol", id: "test-codex", runner: "codex-cli", enabled: true
   billing: "plan", envKeys: ["CODEX_HOME"] };
 const sdk = { leg: "gemini", id: "test-gemini", runner: "genai-sdk", enabled: true,
   billing: "metered", envKeys: ["GEMINI_API_KEY"], requiredEnv: ["GEMINI_API_KEY"] };
-const claudeHelp = "Commands:\n  auth Manage authentication\nOptions:\n -p, --print\n --model <id>\n --disallowedTools <tools>\n --setting-sources <sources>\n --strict-mcp-config\n";
+const claudeHelp = "Commands:\n  auth Manage authentication\nOptions:\n -p, --print\n --model <id>\n --output-format <format>\n --disallowedTools <tools>\n --setting-sources <sources>\n --strict-mcp-config\n";
 const codexHelp = "Options:\n -m, --model <id>\n -s, --sandbox <mode>\n --skip-git-repo-check\n --ephemeral\n --ignore-user-config\n --disable <feature>\n";
 
 test("doctor refuses an untrusted API pair before inspecting its credential", (t) => {
@@ -278,7 +278,7 @@ test("doctor CLI resolves the consumer's preset and ledger, reporting a missing 
   assert.equal(result.status, 1, result.stderr);
   assert.equal(result.stderr, "");
   const seats = result.stdout.split(/\r?\n/).filter((line) => /\[(?:enabled|disabled|skipped)\]/.test(line));
-  assert.equal(seats.length, 5);
+  assert.equal(seats.length, 6);
   // A preset is a deliberate choice, so its absent CLI stays a loud failure (never auto-skipped).
   assert.equal(seats.filter((line) => line.includes("[enabled]")).length, 1);
   assert.match(seats[0], /^opus \[enabled\]: not runnable; binary: claude missing on PATH/);

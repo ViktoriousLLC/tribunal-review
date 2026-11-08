@@ -11,6 +11,8 @@
 
 const ICON = { BLOCKER: "⛔", SUGGESTION: "•", NIT: "·" };
 
+import { loneFindings } from "./judge.mjs";
+
 export function verdictLine(clusters, actionableCount) {
   const n = (s) => clusters.filter((c) => c.severity === s).length;
   const parts = [`${n("SUGGESTION")} suggestions`, `${n("NIT")} nits`];
@@ -29,7 +31,7 @@ function findingBlock(c) {
   ].filter(Boolean).join("\n");
 }
 
-export function render({ artifact, clusters, summary, decision, legs, round, elapsedMs, disabled = [], metered = null }) {
+export function render({ artifact, clusters, summary, decision, legs, round, elapsedMs, disabled = [], metered = null, judge = null, stopPatching = [] }) {
   const out = [];
   out.push(`## 🧑‍⚖️ Tribunal — ${artifact.title || artifact.source || "artifact"} (round ${round})`);
   out.push("");
@@ -62,12 +64,23 @@ export function render({ artifact, clusters, summary, decision, legs, round, ela
     for (const c of list) out.push(findingBlock(c), "");
   }
 
-  const sole = clusters.filter((c) => c.foundBy.length === 1 && c.severity !== "NIT");
+  const sole = loneFindings(clusters).filter(({ cluster }) => cluster.severity !== "NIT");
   if (sole.length) {
     out.push("### What only one model saw");
     out.push("_The reason to run a panel rather than one model. Also the shape a hallucination takes, so each is a hypothesis until checked._");
-    for (const c of sole) out.push(`- ${ICON[c.severity]} **${c.title}** _(${c.foundBy[0]})_`);
+    for (const { id, cluster: c } of sole) {
+      const verdict = judge?.ran ? judge.verdicts.find((entry) => entry.id === id) : null;
+      const tag = verdict?.verdict === "keep" ? ` · judge: keep${verdict.why ? `: ${verdict.why}` : ""}`
+        : verdict?.verdict === "demote" ? ` · judge: likely false positive: ${verdict.why}` : "";
+      out.push(`- ${ICON[c.severity]} **${c.title}** _(${c.foundBy[0]})_${tag}`);
+    }
     out.push("");
+  }
+
+  if (judge?.ran) {
+    out.push(`_Blinded judge (${judge.model}${judge.effortShown ? `, effort ${judge.effortShown}` : ""}, trial): ${judge.kept} keep · ${judge.demoted} likely false · ${judge.unjudged} not judged. Annotation only; it changes no count, verdict or gate._`, "");
+  } else if (judge && judge.reason && !["turned off", "no single-model findings", "fewer than two reviewers answered"].includes(judge.reason)) {
+    out.push(`_Blinded judge did not run: ${judge.reason}._`, "");
   }
 
   const nits = bySev("NIT");
@@ -77,11 +90,25 @@ export function render({ artifact, clusters, summary, decision, legs, round, ela
     out.push("", "</details>", "");
   }
 
-  out.push(`**Next:** ${decision.action} — ${decision.why}`);
+  out.push(nextLine(decision, stopPatching));
   out.push("");
-  const answered = legs.filter((l) => l.answered).map((l) => `${l.leg} (${l.model})`).join(", ");
+  const answered = legs.filter((l) => l.answered).map((l) => `${l.leg} (${l.model}, effort ${l.effortShown || "model default"})`).join(", ");
   out.push(`_${legs.length} legs, ${(elapsedMs / 1000).toFixed(0)}s: ${answered || "none answered"}. ${costLine(metered)}_`);
   return out.join("\n");
+}
+
+/**
+ * The `Next:` line. A STOP PATCHING signal replaces only a CONTINUE: a PARTIAL, a REDO or the
+ * ceiling already tells the operator to do something other than fix the next instance. The
+ * decision itself is unchanged and is named, so the advice never reads as a new verdict.
+ */
+export function nextLine(decision, stopPatching = []) {
+  if (decision.action !== "CONTINUE" || !stopPatching.length) return `**Next:** ${decision.action} — ${decision.why}`;
+  const names = stopPatching.map((s) => `\`${s.mechanism}\``).join(", ");
+  const [previous, current] = stopPatching[0].rounds;
+  return `**Next:** STOP PATCHING — ${names} drew actionable findings in rounds ${previous} and ${current}. `
+    + "Before another round, choose in writing: cut it (revert), redesign it once (only if that removes machinery), "
+    + `or ship it behind an off-by-default switch. Verdict unchanged: ${decision.action}/${decision.reason}, ${decision.why}`;
 }
 
 /**

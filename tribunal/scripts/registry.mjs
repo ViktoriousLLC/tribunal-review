@@ -12,7 +12,7 @@ import { openaiApiEnvironment, openaiApiRowProblems } from "./openaiApi.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const REGISTRY_PATH = join(HERE, "models.default.json");
 
-const RUNNERS = new Set(["claude-cli", "codex-cli", "grok-cli", "genai-sdk", "openai-api"]);
+const RUNNERS = new Set(["claude-cli", "codex-cli", "grok-cli", "agy-cli", "genai-sdk", "openai-api"]);
 const BILLING = new Set(["plan", "metered"]);
 
 /**
@@ -23,7 +23,7 @@ const BILLING = new Set(["plan", "metered"]);
  * someone else's. Plain SDK/API legs have no tools; the compatible API runner additionally
  * requires the key's name and destination origin to be bound in the user's trust file.
  */
-const AGENT_RUNNERS = new Set(["claude-cli", "codex-cli", "grok-cli"]);
+const AGENT_RUNNERS = new Set(["claude-cli", "codex-cli", "grok-cli", "agy-cli"]);
 const SPEND_KEYS = new Set(["GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "XAI_API_KEY"]);
 
 /** A trial seat's last day, as YYYY-MM-DD. The seat runs through that UTC day and is off after it. */
@@ -59,6 +59,12 @@ export function validateLegs(legs) {
     else if (seenIds.has(l.id)) problems.push(`${at} runs "${l.id}", which another leg already runs; a panel of N names must be N models or it is not cross-model`);
     else seenIds.add(l.id);
     if (!RUNNERS.has(l.runner)) problems.push(`${at} has runner "${l.runner}", expected one of ${[...RUNNERS].join(", ")}`);
+    if (l.family !== undefined && (l.runner !== "codex-cli" || typeof l.family !== "string" || !/^[a-z0-9-]+$/.test(l.family))) {
+      problems.push(`${at} family must be a string of [a-z0-9-]+ on a codex-cli leg`);
+    }
+    if (l.effort !== undefined && !["low", "medium", "high", "xhigh", "max", "ultra"].includes(l.effort)) {
+      problems.push(`${at} effort must be low, medium, high, xhigh, max or ultra`);
+    }
     if (!BILLING.has(l.billing)) problems.push(`${at} has billing "${l.billing}", expected plan or metered`);
     if (!Array.isArray(l.envKeys)) problems.push(`${at} has no envKeys array`);
     if (typeof l.enabled !== "boolean") problems.push(`${at} has no boolean enabled`);
@@ -72,6 +78,17 @@ export function validateLegs(legs) {
     // every name a future Grok build might read a key from, so this runner gets an allowlist.
     if (l.runner === "grok-cli" && !(Array.isArray(l.envKeys) && l.envKeys.length === 1 && l.envKeys[0] === "GROK_HOME")) {
       problems.push(`${at} is a grok-cli seat; its envKeys must be exactly ["GROK_HOME"]`);
+    }
+    // An Antigravity seat is the Google AI Pro plan or nothing: agy also signs in from a Gemini key
+    // or a service account, both metered, so it needs no variable and may be handed none.
+    if (l.runner === "agy-cli") {
+      if (l.billing !== "plan") problems.push(`${at} is an agy-cli seat; its billing must be "plan" (the paid sign-ins are refused)`);
+      if (Array.isArray(l.envKeys) && l.envKeys.length) problems.push(`${at} is an agy-cli seat; its envKeys must be empty`);
+      if (l.requiredEnv !== undefined && !(Array.isArray(l.requiredEnv) && l.requiredEnv.length === 0)) {
+        problems.push(`${at} is an agy-cli seat; it requires no environment variable`);
+      }
+      if (l.vendor !== "google") problems.push(`${at} is an agy-cli seat; its vendor must be "google"`);
+      if (l.effort === "ultra") problems.push(`${at} is an agy-cli seat; agy has no "ultra" effort`);
     }
 
     // The two invariants that are about safety rather than shape.
@@ -172,6 +189,7 @@ export function allPinnedIds(legs) {
   const ids = [];
   for (const l of legs) {
     ids.push({ leg: l.leg, id: l.id, vendor: l.vendor, role: "primary" });
+    if (l.pinnedId && l.pinnedId !== l.id) ids.push({ leg: l.leg, id: l.pinnedId, vendor: l.vendor, role: "pinned" });
     if (l.fallback) ids.push({ leg: l.leg, id: l.fallback, vendor: l.vendor, role: "fallback" });
   }
   return ids;

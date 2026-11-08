@@ -8,7 +8,7 @@
   "legs": [
     {
       "leg": "opus",
-      "id": "claude-opus-5",
+      "id": "opus",
       "vendor": "anthropic",
       "runner": "claude-cli",
       "billing": "plan",

@@ -21,6 +21,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveExe } from "./executable.mjs";
+import { redactSensitive as redact } from "./artifact.mjs";
 import { openaiApiEnvironment, openaiApiEndpoint, OPENAI_API_TIMEOUT_MS } from "./openaiApi.mjs";
 export const CODEX_DISABLED_FEATURES = [
   "shell_tool", // no command execution, so no reading the credential
@@ -71,11 +72,63 @@ export const GROK_FIXED_ENV = {
 /** The home variables a Grok leg points at its own empty directory. */
 export const GROK_HOME_VARS = ["HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"];
 
+/**
+ * Names that move an Antigravity (agy) seat off the Google AI Pro plan and onto a bill. agy 1.1.13
+ * signs in from GEMINI_API_KEY with no prompt, and 1.1.10+ from a service account or ADC; any of
+ * them in the child's environment would silently replace the plan sign-in. envForLeg never copies
+ * them, and a test hands it every one to prove that.
+ */
+export const AGY_FORBIDDEN_ENV = [
+  "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+  "AGY_ADC_AUTH", "ANTIGRAVITY_API_KEY", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION",
+  "GOOGLE_GENAI_USE_VERTEXAI", "CLOUDSDK_CONFIG", "CLOUDSDK_AUTH_ACCESS_TOKEN",
+];
+
+/**
+ * Per-run agy settings (never saved). `useG1Credits: false` keeps an exhausted plan allowance from
+ * being paid out of purchased AI credits. The deny list removes every tool: without the read_file
+ * rule agy read a file OUTSIDE its workspace on 2026-10-30, and the review is in the prompt anyway.
+ */
+export const AGY_SETTINGS = {
+  useG1Credits: false,
+  permissions: {
+    deny: ["command(*)", "write_file(*)", "read_file(*)", "read_url(*)", "execute_url(*)", "mcp(*)", "unsandboxed(*)"],
+  },
+};
+
+/**
+ * Does an agy seat get its own empty home on this platform? On Windows the plan sign-in lives in
+ * the system credential store, not the home: with HOME, USERPROFILE, APPDATA and LOCALAPPDATA all
+ * pointed at an empty directory agy still answered on the account (measured 2026-10-30). An empty
+ * home keeps the user's agy hooks, saved settings (a saved useG1Credits), .env files, gcloud ADC
+ * file and any scheduled task out of the run. Elsewhere the sign-in may be a file in the home, so the
+ * seat does not run there at all until that is measured (policy.mjs turns it off).
+ */
+export function agyHomeIsolated(platform = process.platform) {
+  return platform === "win32";
+}
+
 export const DEFAULT_TIMEOUT_MS = 12 * 60 * 1000;
 
 // Exact vendor refusal text; unrelated hook output on stderr does not turn it into a crash.
 export const FABLE_PLAN_LIMIT_REPLY = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
 export const SHORT_REPLY_BYTES = 256;
+export const RATE_LIMIT_RETRY_MS = 60000;
+// Prompt lines are removed before classification. Only the last remaining error marker
+// (optionally timestamped) can name a refusal; short stdout must begin with one.
+const ERROR_LINE = /^(?:\[[^\]\r\n]*\]\s*|\d{4}-\d\d-\d\dT\S+\s+)?(?:ERROR|Error|error|API Error)\b[^\r\n]*/gm;
+// A spent quota is not a rate limit: waiting does not help (OpenAI insufficient_quota). Gemini's
+// "exceeded your current quota" is NOT here: it uses the same words for a per-minute limit,
+// where the one retry is what saves the round, and a spent daily quota only costs one wait.
+const QUOTA_EXHAUSTED = /insufficient_quota/i;
+const lastErrorLine = (stderr) => [...stderr.matchAll(ERROR_LINE)].at(-1)?.[0].trim() ?? "";
+const RATE_LIMIT = /^(?:API Error:\s*429\b|(?:error:\s*)?(?:rate[ _-]?limit(?:ed|_error|_exceeded)?|too many requests)\b)/i;
+
+/** Remove whole echoed prompt lines, including contracts, before trusting stderr. */
+export function stripEchoedPrompt(stderr, promptText) {
+  const lines = new Set(promptText.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim()).filter(Boolean));
+  return stderr.replace(/\r\n/g, "\n").split("\n").filter((line) => !lines.has(line.trim())).join("\n");
+}
 
 /** Classify observed signals. Optional context supplies names and our timer duration. */
 export function classifyLegOutcome({ code, stdout = "", stderr = "", timedOut = false,
@@ -88,6 +141,18 @@ export function classifyLegOutcome({ code, stdout = "", stderr = "", timedOut = 
   if (code !== 0 && (trace.test(stdout) || trace.test(stderr)
     || (stdout.includes(FABLE_PLAN_LIMIT_REPLY) && output !== FABLE_PLAN_LIMIT_REPLY))) {
     return { kind: "failed", reason: "crashed" };
+  }
+  // A timeout is never a rate limit: retrying it would spend a second full leg timeout.
+  // A CLI may print banners on stdout before its stderr error line.
+  // A plan-limit refusal is a not-run (handled below), never a retry, even beside a 429 line.
+  if (code !== 0 && !timedOut && !hasFindings && output !== FABLE_PLAN_LIMIT_REPLY
+    && !/^You've reached your .{1,40}? limit\./.test(output)
+    && !QUOTA_EXHAUSTED.test(stderr) && !QUOTA_EXHAUSTED.test(stdout)
+    // A Claude JSON envelope unwraps to result text that BEGINS `API Error: 429`, at any length.
+    && (/\b429\b/.test(lastErrorLine(stderr)) || /^API Error:\s*429\b/.test(output)
+      || (Buffer.byteLength(output, "utf8") <= SHORT_REPLY_BYTES
+        && (RATE_LIMIT.test(output) || /\b429\b/.test(lastErrorLine(output)))))) {
+    return { kind: "failed", reason: "rate limited" };
   }
   if (code === 0 && !hasFindings) {
     return { kind: "failed", reason: output ? "reply could not be parsed" : "empty reply" };
@@ -120,7 +185,12 @@ export function classifyLegOutcome({ code, stdout = "", stderr = "", timedOut = 
   // of work, so an interrupted reply stays blocking even without a close event's exit code.
   // Vendor 5xx and transport prose have no recognized refusal shape here. Treat unknown
   // output as failed; guessing that it means not-run would silently shrink a panel.
-  return { kind: "failed", reason: "unrecognised" };
+  // Name the CLI's own last error line so the operator can act on it: a bare "unrecognised"
+  // can hide a cause as simple as a 429. Only a line that STARTS with an error marker is quoted, so an
+  // echoed prompt has already been removed before classification.
+  // A Claude JSON envelope carries its error as result text on stdout (`API Error: 529 ...`).
+  const errorLine = lastErrorLine(stderr) || (/^API Error:/.test(output) ? output.split("\n")[0] : "");
+  return { kind: "failed", reason: "unrecognised", ...(errorLine ? { detail: redact(errorLine).slice(0, 160) } : {}) };
 }
 
 function legResult(leg, signals) {
@@ -130,8 +200,9 @@ function legResult(leg, signals) {
   return {
     leg: leg.leg, model: leg.id, ...outcome,
     // Keep the legacy distinction: prose is an answer we could not read.
-    answered: outcome.kind !== "not-run" && Boolean(raw.trim()),
-    error: outcome.kind === "answered" ? null : `${outcome.kind === "not-run" ? "not run" : "failed"}: ${outcome.reason}`,
+    answered: outcome.kind !== "not-run" && outcome.reason !== "rate limited" && Boolean(raw.trim()),
+    error: outcome.kind === "answered" ? null
+      : `${outcome.kind === "not-run" ? "not run" : "failed"}: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ""}`,
     findings, raw, parseFailed: Boolean(outcome.kind === "failed" && parseError && raw.trim()),
     // Bank only this shape flag, never reply text, for the consecutive-run warning.
     shortUnrecognised: outcome.kind === "failed" && outcome.reason === "unrecognised"
@@ -186,6 +257,14 @@ export function envForLeg(leg, source = process.env, { home = null } = {}) {
     // headless mode. Point every home variable at the leg's own empty directory so it reads none.
     if (home) for (const k of GROK_HOME_VARS) base[k] = home;
   }
+  // The registry already refuses envKeys on an agy seat; this holds even for a row built in code.
+  // Case-insensitively: Windows reads `gemini_api_key` as GEMINI_API_KEY.
+  if (leg.runner === "agy-cli") {
+    const forbidden = new Set(AGY_FORBIDDEN_ENV.map((k) => k.toUpperCase()));
+    for (const k of Object.keys(base)) if (forbidden.has(k.toUpperCase())) delete base[k];
+    // The caller passes a home only where agyHomeIsolated() says the sign-in survives it.
+    if (home) for (const k of GROK_HOME_VARS) base[k] = home;
+  }
   const missing = (leg.requiredEnv || []).filter((k) => !source[k]);
   return { env: base, missing };
 }
@@ -222,6 +301,8 @@ export function argsForLeg(leg) {
   if (leg.runner === "claude-cli") {
     return [
       "-p", "--model", leg.id,
+      "--output-format", "json",
+      ...(leg.effort ? ["--effort", leg.effort] : []),
       "--disallowedTools", CLAUDE_REFUSED_TOOLS.join(","),
       "--setting-sources", "",
       "--strict-mcp-config",
@@ -231,6 +312,7 @@ export function argsForLeg(leg) {
     return [
       "exec", "-m", leg.id, "-s", "read-only", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config",
       ...CODEX_DISABLED_FEATURES.flatMap((f) => ["--disable", f]),
+      ...(leg.effort ? ["-c", `model_reasoning_effort="${leg.effort}"`] : []),
       "-",
     ];
   }
@@ -240,6 +322,15 @@ export function argsForLeg(leg) {
       "--disallowed-tools", GROK_DISALLOWED_TOOLS.join(","),
       "--disable-web-search", "--no-subagents", "--no-memory", "--no-plan", "--max-turns", "1",
       "--system-prompt-override", GROK_REVIEW_SYSTEM,
+    ];
+  }
+  if (leg.runner === "agy-cli") {
+    // No prompt argument: print mode does not read plain stdin, and argv cannot hold a large
+    // diff, so the prompt arrives as one stream-json message (see agyInput).
+    return [
+      "--input-format", "stream-json", "--output-format", "stream-json", "--model", leg.id,
+      ...(leg.effort ? ["--effort", leg.effort] : []),
+      "--disable-slash-commands", "--settings", JSON.stringify(AGY_SETTINGS),
     ];
   }
   throw new Error(`argsForLeg has no argv for runner "${leg.runner}"`);
@@ -365,21 +456,24 @@ export function geminiCostUSD(model, usage, prices, now = new Date()) {
  * It is a METERED leg in the panel, so it fails loudly and never silently retries
  * onto a fallback that costs more than the one that failed.
  */
-export async function runGeminiLeg(leg, userMessage) {
-  const key = process.env.GEMINI_API_KEY;
+export async function runGeminiLeg(leg, userMessage, { sourceEnv = process.env, generateContent } = {}) {
+  const key = sourceEnv.GEMINI_API_KEY;
   if (!key) return legResult(leg, { missingCredentials: ["GEMINI_API_KEY"] });
-  let GoogleGenAI;
-  try {
-    ({ GoogleGenAI } = await import("@google/genai"));
-  } catch (e) {
-    return { ...legResult(leg, {}), error: `failed: @google/genai is not installed: ${e.message}` };
+  if (!generateContent) {
+    try {
+      const { GoogleGenAI } = await import("@google/genai");
+      const ai = new GoogleGenAI({ apiKey: key });
+      generateContent = (request) => ai.models.generateContent(request);
+    } catch (e) {
+      return { ...legResult(leg, {}), error: `failed: @google/genai is not installed: ${e.message}` };
+    }
   }
-  const ai = new GoogleGenAI({ apiKey: key });
   const ladder = [...new Set([leg.id, leg.fallback].filter(Boolean))];
   const errors = [];
+  let rateLimited = 0;
   for (const model of ladder) {
     try {
-      const res = await ai.models.generateContent({ model, contents: `${userMessage}\n\n${FINDING_CONTRACT}` });
+      const res = await generateContent({ model, contents: `${userMessage}\n\n${FINDING_CONTRACT}` });
       const raw = res?.text ?? "";
       const usage = geminiUsage(res?.usageMetadata);
       return {
@@ -388,9 +482,13 @@ export async function runGeminiLeg(leg, userMessage) {
         usd: geminiCostUSD(model, usage, leg.pricesUSDPer1M),
       };
     } catch (e) {
+      if ((e.status === 429 || e.code === 429) && !QUOTA_EXHAUSTED.test(String(e.message))) {
+        rateLimited += 1;
+      }
       errors.push(`${model}: ${e.message}`);
     }
   }
+  if (rateLimited === ladder.length) return legResult(leg, { code: 1, stderr: "ERROR: 429 Too Many Requests" });
   return { ...legResult(leg, {}), error: `failed: every Gemini rung failed: ${errors.join("; ")}` };
 }
 
@@ -461,6 +559,7 @@ export async function runOpenAIAPILeg(leg, userMessage, { sourceEnv = process.en
     });
     const { status, body } = response;
     if (status < 200 || status >= 300) {
+      if (status === 429 && !QUOTA_EXHAUSTED.test(body)) return failure("failed", "rate limited", { status });
       return failure(status === 401 ? "not-run" : "failed",
         `HTTP ${status}: ${redact(body).slice(0, 200)}`, { status });
     }
@@ -492,8 +591,131 @@ export function unwrapGrokOutput(stdout) {
     tokensCached: count(u.cache_read_input_tokens) } };
 }
 
-export function runLeg(leg, userMessage, { timeoutMs, sourceEnv = process.env, spawnFn = spawn, mkTemp = () => mkdtemp(join(tmpdir(), "tribunal-leg-")) } = {}) {
-  if (leg.runner === "genai-sdk") return runGeminiLeg(leg, userMessage);
+/** The one stdin line an agy seat receives: a stream-json user message carrying the prompt. */
+export function agyInput(promptText) {
+  return `${JSON.stringify({ event: "user", message: { content: promptText } })}\n`;
+}
+
+/**
+ * agy's stream-json stdout is NDJSON ending in one `result` event. Read the LAST result line and
+ * skip anything unparseable. `found: false` means no result arrived, so the caller classifies on
+ * the exit code and timer alone; the step_update deltas are never treated as a reply.
+ * Thinking tokens are counted as output, as Gemini bills them.
+ */
+export function unwrapAgyOutput(stdout) {
+  let result = null;
+  for (const line of String(stdout || "").split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed?.event === "result" && parsed.result && typeof parsed.result === "object") result = parsed.result;
+    } catch { /* a partial or foreign line is not the result */ }
+  }
+  if (!result) return { found: false, stdout: "", status: null, error: null, finishedReason: null, usage: null };
+  const count = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : null);
+  const u = result.usage && typeof result.usage === "object" ? result.usage : {};
+  const out = count(u.output_tokens);
+  return {
+    found: true,
+    stdout: typeof result.response === "string" ? result.response : "",
+    status: typeof result.status === "string" ? result.status : null,
+    error: typeof result.error === "string" ? result.error : null,
+    finishedReason: typeof result.finished_reason === "string" ? result.finished_reason : null,
+    usage: { tokensIn: count(u.input_tokens), tokensOut: out === null ? null : out + (count(u.thinking_tokens) ?? 0),
+      tokensCached: count(u.cache_read_tokens) },
+  };
+}
+
+export const AGY_PLAN_LIMIT_REASON = "Google AI Pro allowance used up; waits for the reset (the paid key is never used instead)";
+export const AGY_SIGN_IN_REASON = "Antigravity is not signed in; run agy once to sign in with the Google AI Pro account";
+
+/**
+ * The agy outcomes the shared classifier cannot see, because agy reports them inside the result
+ * event (and has exited 0 while doing so). Null means "classify the response as any other leg".
+ */
+export function agyOutcome(unwrapped) {
+  if (!unwrapped?.found) return null;
+  // agy omits finished_reason on a normal finish (measured). Only that, or a value that names a
+  // normal stop, lets a SUCCESS be read as a review: max_tokens, a timeout, SAFETY, RECITATION or
+  // any reason not on this list may have cut the findings short.
+  const finished = unwrapped.finishedReason?.toLowerCase() ?? null;
+  if (unwrapped.status === "SUCCESS" && (finished === null || ["stop", "end_turn", "completed"].includes(finished))) return null;
+  if (unwrapped.status === "SUCCESS" || ["print_timeout", "interrupted", "max_tokens"].includes(finished)) {
+    return { kind: "failed", reason: `agy stopped early (${unwrapped.finishedReason}); a partial answer is not a review` };
+  }
+  const error = unwrapped.error || "";
+  const detail = error ? redact(error.split("\n")[0]).slice(0, 160) : undefined;
+  // A spent allowance in agy's own words. Kept narrow: Gemini's per-minute 429 also says
+  // "quota" and RESOURCE_EXHAUSTED, and that one is retried once below rather than parked.
+  if (/AI credits balance is too low|(?:weekly|daily|7-day|5-hour) (?:usage )?limit|usage limit (?:reached|exceeded)|allowance (?:is )?(?:used up|exhausted)/i.test(error)) {
+    return { kind: "not-run", reason: AGY_PLAN_LIMIT_REASON, ...(detail ? { detail } : {}) };
+  }
+  if (/\b429\b|too many requests|rate[ _-]?limit|resource[ _-]?exhausted|quota/i.test(error)) {
+    return { kind: "failed", reason: "rate limited", ...(detail ? { detail } : {}) };
+  }
+  if (/authentication expired|not logged in|log back in|please sign in|sign in to continue/i.test(error)) {
+    return { kind: "not-run", reason: AGY_SIGN_IN_REASON };
+  }
+  if (/^invalid model selection/i.test(error)) {
+    return { kind: "failed", reason: "model not offered by Antigravity", invalidModel: true, ...(detail ? { detail } : {}) };
+  }
+  return { kind: "failed", reason: "unrecognised", ...(detail ? { detail } : {}) };
+}
+
+/** Claude's JSON envelope names the answering model separately from the CLI alias. */
+export function unwrapClaudeOutput(stdout) {
+  const unchanged = { stdout, model: null, usage: null, isError: false };
+  let parsed;
+  try { parsed = JSON.parse(stdout); } catch { return unchanged; }
+  if (!parsed || typeof parsed.result !== "string") return unchanged;
+  const count = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const usage = parsed.usage;
+  const models = parsed.modelUsage;
+  return {
+    stdout: parsed.result,
+    // The reviewer is the model that wrote the most output; a helper model can be listed first.
+    model: models && typeof models === "object" && !Array.isArray(models)
+      ? Object.entries(models).sort(([, a], [, b]) => (Number(b?.outputTokens) || 0) - (Number(a?.outputTokens) || 0))[0]?.[0] ?? null
+      : null,
+    usage: { tokensIn: count(usage?.input_tokens), tokensOut: count(usage?.output_tokens),
+      tokensCached: count(usage?.cache_read_input_tokens) },
+    isError: Boolean(parsed.is_error),
+  };
+}
+
+/** A vendor refusal gets one delayed retry, regardless of the runner that produced it. */
+export async function retryRateLimited(leg, invoke, { sourceEnv = process.env, log = console.error,
+  wait = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms)), random = Math.random } = {}) {
+  const first = await invoke();
+  if (first.reason !== "rate limited") return first;
+  const configured = Number(sourceEnv.TRIBUNAL_RATE_LIMIT_RETRY_MS?.trim() || RATE_LIMIT_RETRY_MS);
+  const delay = Number.isSafeInteger(configured) && configured >= 0 && configured <= 2_147_483_647
+    ? configured : RATE_LIMIT_RETRY_MS;
+  const actualWait = Math.min(2_147_483_647, delay + Math.floor(random() * delay / 4));
+  log(`[panel] ${leg.leg}: rate limited by the vendor, retrying once in ${actualWait >= 1000 ? Math.round(actualWait / 1000) : actualWait / 1000}s`);
+  await wait(actualWait);
+  const second = await invoke();
+  if (second.reason !== "rate limited") return second;
+  const reason = "rate limited (retried once); wait a few minutes and run again";
+  return { ...second, reason, error: `failed: ${reason}` };
+}
+
+export function runLeg(leg, userMessage, options = {}) {
+  return retryRateLimited(leg, () => runLegOnce(leg, userMessage, options), options);
+}
+
+function runLegOnce(leg, userMessage, options = {}) {
+  // An agy id the CLI does not offer gets ONE try on the row's fallback id; run.mjs then prints
+  // the DEMOTED warning because the answering model differs from the primary.
+  if (leg.runner === "agy-cli" && leg.fallback && leg.fallback !== leg.id) {
+    return spawnLeg(leg, userMessage, options).then((first) => (first.invalidModel
+      ? spawnLeg({ ...leg, id: leg.fallback }, userMessage, options) : first));
+  }
+  return spawnLeg(leg, userMessage, options);
+}
+
+function spawnLeg(leg, userMessage, { timeoutMs, sourceEnv = process.env, spawnFn = spawn, mkTemp = () => mkdtemp(join(tmpdir(), "tribunal-leg-")), contract = FINDING_CONTRACT, generateContent, platform = process.platform } = {}) {
+  if (leg.runner === "genai-sdk") return runGeminiLeg(leg, userMessage, { sourceEnv, generateContent });
   if (leg.runner === "openai-api") return runOpenAIAPILeg(leg, userMessage, { timeoutMs, sourceEnv, spawnFn });
   timeoutMs ??= DEFAULT_TIMEOUT_MS;
   const { missing } = envForLeg(leg, sourceEnv);
@@ -501,21 +723,56 @@ export function runLeg(leg, userMessage, { timeoutMs, sourceEnv = process.env, s
     return Promise.resolve(legResult(leg, { missingCredentials: missing }));
   }
   const grok = leg.runner === "grok-cli";
+  const agy = leg.runner === "agy-cli";
+  // policy.mjs already turns the seat off here; this holds for a leg built in code too.
+  if (agy && !agyHomeIsolated(platform)) {
+    return Promise.resolve({ ...legResult(leg, {}), kind: "not-run", answered: false, findings: [], raw: "",
+      reason: `the Antigravity seat runs only on Windows; ${platform} is not measured`,
+      error: `not run: the Antigravity seat runs only on Windows; ${platform} is not measured` });
+  }
+  const promptText = `${userMessage}\n\n${contract}`;
   return mkTemp().then((cwd) => new Promise((resolve) => {
     // The Grok leg's home variables point at this same fresh directory (see envForLeg).
-    const { env } = envForLeg(leg, sourceEnv, { home: grok ? cwd : null });
+    const { env } = envForLeg(leg, sourceEnv, { home: grok || (agy && agyHomeIsolated(platform)) ? cwd : null });
     // Remove each invocation's temporary directory to prevent accumulation during loops.
     // Cleanup is best-effort so a failed removal cannot delay or discard the review result.
     const done = (r) => {
+      const stderr = stripEchoedPrompt(err, promptText);
       if (isOurTempDir(cwd)) rm(cwd, { recursive: true, force: true }).catch(() => {});
-      if (!grok) { resolve(legResult(leg, { stdout: out, stderr: err, timeoutMs, ...r })); return; }
+      if (leg.runner === "claude-cli") {
+        const unwrapped = unwrapClaudeOutput(out);
+        const signals = { stdout: unwrapped.stdout, stderr, timeoutMs, ...r };
+        // An error envelope cannot become a successful review just because the CLI exited zero.
+        if (unwrapped.isError && signals.code === 0) signals.code = 1;
+        resolve({ ...legResult({ ...leg, id: unwrapped.model ?? leg.id }, signals),
+          ...(unwrapped.usage || {}) });
+        return;
+      }
+      if (agy) {
+        const unwrapped = unwrapAgyOutput(out);
+        const tokens = { tokensIn: unwrapped.usage?.tokensIn ?? null, tokensOut: unwrapped.usage?.tokensOut ?? null,
+          tokensCached: unwrapped.usage?.tokensCached ?? null };
+        const fixed = r.timedOut || r.spawnError ? null : agyOutcome(unwrapped);
+        if (fixed) {
+          const { invalidModel, ...outcome } = fixed;
+          resolve({ ...legResult(leg, {}), ...outcome, answered: false, findings: [], raw: unwrapped.stdout,
+            parseFailed: false, shortUnrecognised: false, ...(invalidModel ? { invalidModel: true } : {}),
+            error: `${outcome.kind === "not-run" ? "not run" : "failed"}: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ""}`,
+            ...tokens });
+          return;
+        }
+        // Only a SUCCESS result can be a review; with no result event an exit 0 is an empty reply.
+        resolve({ ...legResult(leg, { stdout: unwrapped.stdout, stderr, timeoutMs, ...r }), ...tokens });
+        return;
+      }
+      if (!grok) { resolve(legResult(leg, { stdout: out, stderr, timeoutMs, ...r })); return; }
       const unwrapped = unwrapGrokOutput(out);
-      resolve({ ...legResult(leg, { stdout: unwrapped.stdout, stderr: err, timeoutMs, ...r }),
+      resolve({ ...legResult(leg, { stdout: unwrapped.stdout, stderr, timeoutMs, ...r }),
         tokensIn: unwrapped.usage?.tokensIn ?? null, tokensOut: unwrapped.usage?.tokensOut ?? null,
         tokensCached: unwrapped.usage?.tokensCached ?? null });
     };
     let out = "", err = "", settled = false, child;
-    const { file, prefix } = resolveExe(leg.runner === "claude-cli" ? "claude" : grok ? "grok" : "codex");
+    const { file, prefix } = resolveExe(leg.runner === "claude-cli" ? "claude" : grok ? "grok" : agy ? "agy" : "codex");
     try {
       child = spawnFn(file, [...prefix, ...argsForLeg(leg)], { cwd, env, shell: false, stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
@@ -540,7 +797,10 @@ export function runLeg(leg, userMessage, { timeoutMs, sourceEnv = process.env, s
       settled = true; clearTimeout(timer);
       done({ code });
     });
-    child.stdin.write(`${userMessage}\n\n${FINDING_CONTRACT}`);
+    // A CLI that exits before reading (agy refusing an unknown --model) closes the pipe; the
+    // write then errors, and an unheard error would crash the whole panel.
+    child.stdin.on?.("error", () => {});
+    child.stdin.write(agy ? agyInput(promptText) : promptText);
     child.stdin.end();
   }));
 }

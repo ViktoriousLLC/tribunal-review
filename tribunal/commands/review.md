@@ -100,9 +100,25 @@ Fix, re-review, repeat. Then:
 - When the same actionable title occurs in at least three rows, inspect the
   **RECURRING FINDING (channel signal)** block and its round numbers. Repeated findings are
   a signal to investigate, not a substitute for checking the code.
+- **Stop patching a mechanism that draws findings two rounds running.** When the runner prints
+  **STOP PATCHING: <file>** (this round and the previous one both had actionable findings on
+  that file), the next fix is probably one more instance of a design that cannot be made
+  complete, such as a text scan that cannot see every spelling of a command. Do not fix it
+  again. Choose one, and write the choice down before another round: **cut it** (revert),
+  **redesign it once** (only if the redesign removes machinery), or **ship it behind an
+  off-by-default switch**. It is advice: the verdict and exit code are unchanged, and the key is
+  only the file, so first check that both rounds really are about one mechanism.
 - **A quiet panel is not a clean system.** The panel reads an artifact; it cannot see two files
   that have drifted apart, a feature that has never executed, or a control that is present but
   unreachable. Prove those by RUNNING things.
+
+After the final round of a PR and before merging, run
+`node "${CLAUDE_PLUGIN_ROOT}/scripts/scorecard.mjs" --pr <n>` and mark every unmarked
+problem. Mark `real` only when you changed code because of it. Use repeatable
+`--mark "P1:real:what changed"`, `--mark "P2:not-real:why it is not a defect"`,
+`--mark "P3:duplicate=P1:why it is the same problem"`, or `--mark "P4:unsure"`.
+Not-real and duplicate marks require a reason. The refreshed scorecard shows the remaining
+unmarked problems and checks the Judge's verdicts against your marks.
 
 ## Before you trust a local run
 

@@ -2,10 +2,10 @@
 // that legRunner uses, with model selection excluded from the boundary's shape.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { argsForLeg, envForLeg, GROK_FIXED_ENV, GROK_HOME_VARS } from "./legRunner.mjs";
+import { argsForLeg, envForLeg, GROK_FIXED_ENV, GROK_HOME_VARS, agyHomeIsolated, AGY_FORBIDDEN_ENV } from "./legRunner.mjs";
 import { resolveExe } from "./executable.mjs";
 
-const CLI_COMMANDS = { "claude-cli": "claude", "codex-cli": "codex", "grok-cli": "grok" };
+const CLI_COMMANDS = { "claude-cli": "claude", "codex-cli": "codex", "grok-cli": "grok", "agy-cli": "agy" };
 
 export function cliCommand(runner) {
   return Object.hasOwn(CLI_COMMANDS, runner) ? CLI_COMMANDS[runner] : null;
@@ -25,7 +25,10 @@ export function argvShapeHash(leg) {
   // switches), so a change to either invalidates a recorded PASS. Other runners hash argv only.
   const shape = leg.runner === "grok-cli"
     ? { argv: argsForLeg({ ...leg, id: "" }), env: GROK_FIXED_ENV, homes: GROK_HOME_VARS }
-    : argsForLeg({ ...leg, id: "" });
+    // An agy seat's isolation also rests on whether it runs in its own empty home.
+    : leg.runner === "agy-cli"
+      ? { argv: argsForLeg({ ...leg, id: "" }), forbidden: AGY_FORBIDDEN_ENV, homes: agyHomeIsolated() ? GROK_HOME_VARS : [] }
+      : argsForLeg({ ...leg, id: "" });
   return createHash("sha256").update(JSON.stringify(shape)).digest("hex");
 }
 

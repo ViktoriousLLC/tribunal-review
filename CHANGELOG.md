@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.15.0 — 2026-11-08
+
+- **STOP PATCHING** block: when this round and the previous round of the same artifact both
+  have actionable findings on one mechanism (keyed by the finding's file), the runner names
+  both rounds and the three choices (cut it, redesign it once only if that removes machinery,
+  or an off-by-default switch), and a CONTINUE `Next:` line becomes a stop-patching
+  recommendation. Advice only: verdict, gates and exit code are unchanged. The rule is in the
+  review command. Adapted from the stopping rule in phuryn/product-engineering (MIT).
+
+## v0.14.0 — 2026-10-30
+
+- New `agy-cli` runner: a Gemini seat through the Antigravity CLI on a Google AI Pro sign-in,
+  plan-covered instead of metered. Shipped as the disabled `antigravity` template row.
+- No metered credential is handed to the seat: the registry refuses `envKeys`, `requiredEnv`
+  and non-plan billing on it, and the spawn drops every `AGY_FORBIDDEN_ENV` name in any case.
+  Each run sets `useG1Credits: false`, agy's switch for paying a used-up allowance from AI
+  credits. The seat runs only on Windows, in its own empty home (the sign-in lives in the
+  credential store), so the user's agy hooks, saved settings and credential files stay out of it;
+  elsewhere the policy turns it off and says why, because that isolation is not measured there.
+- Prompts travel as one stream-json message; replies are read from the final `result` event,
+  and an `ERROR` result is never an answer even on exit 0. A used-up allowance and a missing
+  sign-in are named not-runs, never a fallback to the paid key; a per-minute limit is retried
+  once. A reply cut off at its output limit is not a review. An unknown model id gets one run on
+  the row's fallback with the DEMOTED warning. Web search cannot be denied and is documented.
+- Per-run deny rules for commands, file reads and writes, URLs, MCP and unsandboxed runs. The
+  isolation probe certifies the seat (`--leg agy`); doctor reports its binary and says the
+  sign-in cannot be checked without a model call.
+
+## v0.13.0 — 2026-10-28
+
+- Bank each round's finding list with a join to the Judge's verdicts. The new PR scorecard
+  tracks total findings, stable unique problems, per-model credit, and operator-marked real
+  and not-real problems across complete rounds. Duplicate marks fold related problems;
+  append-only marks live separately from review history. Older rounds retain their totals
+  and explicitly report that unique problems were not recorded.
+- Print a running scorecard after banking, compare Judge verdicts with operator marks, and
+  the review command now asks the operator to mark every problem after the final PR round and
+  before merging. Nothing enforces it yet: no gate reads the marks.
+- Print source selectors in literal single quotes for bash and PowerShell; keys with a
+  single quote or newline get a non-pasteable hint. Preserve marks appended after an
+  unterminated row and ignore unsupported stored verdicts.
+- Recognize vendor rate limits and retry once after 60 seconds (configurable with
+  `TRIBUNAL_RATE_LIMIT_RETRY_MS`) across runners. A second refusal remains a failed leg and
+  asks the operator to wait before running again. Strip echoed prompt and contract lines from
+  CLI stderr before classification. Rate limits require a failed exit without a timeout and
+  either the last filtered stderr error naming 429 or a short stdout refusal. Ordinary review
+  prose is not a refusal, and `insufficient_quota` is never retried. Gemini tries each fallback
+  rung before treating an all-429 ladder as rate limited; mixed errors retain every rung's failure.
+- An `unrecognised` leg failure now quotes the CLI's last filtered error line, redacted before
+  truncation to 160 characters, so the next unknown failure names itself instead of hiding (DEV-1472).
+
+## v0.12.1 — 2026-10-19
+
+- A Claude seat now shows the effort level it actually ran at. The Claude CLI does not report it,
+  so the runner names the documented default for the model that answered (Opus 5.5 = medium,
+  Fable 5.1 = high), and says "not reported" for a model it has no documented level for. The
+  judge line shows its effort too.
+
+## v0.12.0 — 2026-10-19
+
+- Claude reviewers use CLI aliases for the newest model; Codex reviewers resolve the newest
+  visible model in their family from the local model list, retaining the pinned model when
+  the installed CLI is older than that list or resolution is unavailable.
+- Report the answering model and effort in panel status, review footers and ledger rows.
+  Effort stays at the model default unless the registry explicitly sets `effort`.
+- Read Claude JSON replies for model identity and token usage while preserving plan-limit
+  and crash classification. The judge also reports its answering model.
+
+## v0.11.0 — 2026-10-19
+
+- Trial a blinded judge for non-nit findings raised by exactly one reviewer. One extra Claude CLI call per round
+  with lone findings reads the artifact and findings without reviewer identities, and adds
+  keep or likely false positive annotations with reasons.
+- Annotation only: clusters, actionable counts, decisions, proofs, exit codes, and gates stay
+  unchanged. Judge failures fail open. Results appear in human and JSON output and the
+  ledger's `judge` field. On by default; disable with `"judge": false` or `--no-judge`.
+
 ## v0.10.3 — 2026-10-19
 
 Three design calls left open by the v0.10.2 break-it pass.

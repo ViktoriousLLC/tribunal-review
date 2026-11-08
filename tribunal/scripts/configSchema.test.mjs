@@ -22,7 +22,7 @@ const legFields = ["enabledLegs", "disabledLegs"];
 // adding an unsupported constraint must fail visibly, never silently weaken validation.
 function validate(value, schema) {
   const supported = new Set(["$schema", "title", "description", "type", "properties",
-    "additionalProperties", "items", "enum", "minLength", "pattern"]);
+    "additionalProperties", "items", "enum", "minLength", "pattern", "default"]);
   function checkSchema(node) {
     assert.ok(node && typeof node === "object" && !Array.isArray(node), "schema node must be an object");
     for (const key of Object.keys(node)) assert.ok(supported.has(key), `unsupported schema keyword: ${key}`);
@@ -50,6 +50,7 @@ function validate(value, schema) {
       assert.equal(typeof node.pattern, "string");
       new RegExp(node.pattern, "u");
     }
+    if (Object.hasOwn(node, "default")) checkData(node.default, node);
   }
   function checkData(data, node, at = "config") {
     if (node.type === "object") {
@@ -77,7 +78,7 @@ function validate(value, schema) {
 test("config example validates and covers every documented policy field", () => {
   const schema = readJson("tribunal.config.schema.json");
   const example = readJson("tribunal.config.example.json");
-  const fields = ["preset", "gates", ...pathFields, ...legFields].sort();
+  const fields = ["preset", "gates", "judge", ...pathFields, ...legFields].sort();
   assert.deepEqual(Object.keys(schema.properties).sort(), fields);
   assert.deepEqual(Object.keys(example).sort(), fields);
   validate(example, schema);
@@ -134,6 +135,7 @@ test("the complete example resolves through the real policy with repository-rela
   const policy = resolvePolicy(repo);
   assert.deepEqual(policy.gates, { goalWall: true, mergeGate: true });
   assert.deepEqual(policy.gates, example.gates);
+  assert.equal(policy.judge, example.judge);
   for (const field of pathFields) assert.equal(policy[field], resolve(repo, example[field]));
   for (const field of legFields) assert.deepEqual(policy[field], example[field]);
   for (const name of example.enabledLegs) {
@@ -148,6 +150,24 @@ function gateRepository(t) {
   mkdirSync(join(repo, ".git"));
   return repo;
 }
+
+test("judge defaults on, accepts boolean opt-outs, and rejects non-booleans in schema and policy", (t) => {
+  const repo = gateRepository(t);
+  const schema = readJson("tribunal.config.schema.json");
+  const options = { resolveExecutable: () => ({ found: false }) };
+  assert.equal(schema.properties.judge.default, true);
+  assert.equal(resolvePolicy(repo, options).judge, true);
+  for (const config of [{}, { judge: true }, { judge: false }]) {
+    validate(config, schema);
+    writeFileSync(join(repo, "tribunal.config.json"), JSON.stringify(config));
+    assert.equal(resolvePolicy(repo, options).judge, config.judge ?? true);
+  }
+  for (const judge of [null, "false", 0, 1, [], {}]) {
+    assert.throws(() => validate({ judge }, schema), /must be a boolean/);
+    writeFileSync(join(repo, "tribunal.config.json"), JSON.stringify({ judge }));
+    assert.throws(() => resolvePolicy(repo, options), { message: "judge must be a boolean" });
+  }
+});
 
 // Mutation: default either gate to false or omit gates from resolvePolicy; unconfigured repos must enforce both gates.
 test("policy enables both gates when configuration or gate fields are omitted", (t) => {

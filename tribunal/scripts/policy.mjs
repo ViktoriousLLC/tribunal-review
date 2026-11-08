@@ -6,10 +6,11 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadRegistry, seatExpired } from "./registry.mjs";
 import { resolveExe } from "./executable.mjs";
+import { agyHomeIsolated } from "./legRunner.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PRESETS = ["claude-only", "claude-plus-chatgpt", "claude-plus-api-keys"];
-const CLI_OF_RUNNER = { "claude-cli": "claude", "codex-cli": "codex", "grok-cli": "grok" };
+const CLI_OF_RUNNER = { "claude-cli": "claude", "codex-cli": "codex", "grok-cli": "grok", "agy-cli": "agy" };
 
 /**
  * Seats whose CLI is not installed on this machine are skipped, not failed.
@@ -32,7 +33,7 @@ function skipUninstalledSeats(registry, { enabledLegs, customRegistry, resolveEx
   });
 }
 
-export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolveExe, now = new Date() } = {}) {
+export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolveExe, now = new Date(), platform = process.platform } = {}) {
   const workingDirectory = resolve(cwd);
   let repoRoot = workingDirectory;
   for (let candidate = workingDirectory; ; candidate = dirname(candidate)) {
@@ -43,7 +44,7 @@ export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolve
   const configFile = join(repoRoot, "tribunal.config.json");
   const config = existsSync(configFile) ? JSON.parse(readFileSync(configFile, "utf8")) : {};
   if (!config || Array.isArray(config) || typeof config !== "object") throw new Error("tribunal.config.json must be an object");
-  const allowed = new Set(["preset", "modelsFile", "reviewerPromptPath", "ledgerHome", "goalsDir", "enabledLegs", "disabledLegs", "envFile", "gates"]);
+  const allowed = new Set(["preset", "modelsFile", "reviewerPromptPath", "ledgerHome", "goalsDir", "enabledLegs", "disabledLegs", "envFile", "gates", "judge"]);
   for (const key of Object.keys(config)) {
     if (!allowed.has(key)) throw new Error(`unsupported tribunal.config.json field: ${key}; configure paths, leg names, and gate switches only, never credentials`);
   }
@@ -56,6 +57,8 @@ export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolve
   for (const key of ["enabledLegs", "disabledLegs"]) {
     if (config[key] !== undefined && (!Array.isArray(config[key]) || config[key].some((leg) => typeof leg !== "string" || !leg))) throw new Error(`${key} must be an array of leg names`);
   }
+  if (config.judge !== undefined && typeof config.judge !== "boolean") throw new Error("judge must be a boolean");
+  const judge = config.judge ?? true;
   const gates = { goalWall: true, mergeGate: true };
   if (config.gates !== undefined) {
     if (!config.gates || Array.isArray(config.gates) || typeof config.gates !== "object") throw new Error("gates must be an object");
@@ -94,10 +97,15 @@ export function resolvePolicy(cwd = process.cwd(), { resolveExecutable = resolve
     // own end, and a trial that outlives it would keep spending an allowance nobody re-approved.
     .map((leg) => leg.enabled && seatExpired(leg, now)
       ? { ...leg, enabled: false, expired: true, disabledReason: `Trial seat ended on ${leg.until}. Extend or remove until in the models file to run it again.` }
+      : leg)
+    // The Antigravity seat's plan-only guarantee rests on its empty home, measured only on Windows.
+    // Elsewhere the real home (credential files, saved settings, hooks) would reach it, so it is off.
+    .map((leg) => leg.enabled && leg.runner === "agy-cli" && !agyHomeIsolated(platform)
+      ? { ...leg, enabled: false, disabledReason: `The Antigravity seat runs only on Windows, where its empty-home isolation was measured; ${platform} is not measured.` }
       : leg);
   for (const leg of [...enabledLegs, ...disabledLegs]) {
     if (!registry.some((entry) => entry.leg === leg)) throw new Error(`unknown configured leg: ${leg}`);
   }
-  return { repoRoot, repoSlug, configFile, modelsFile, reviewerPromptPath, ledgerHome, goalsDir, envFile, gates,
+  return { repoRoot, repoSlug, configFile, modelsFile, reviewerPromptPath, ledgerHome, goalsDir, envFile, gates, judge,
     probeRecord: join(ledgerHome, "isolation-probe.md"), enabledLegs, disabledLegs, registry };
 }

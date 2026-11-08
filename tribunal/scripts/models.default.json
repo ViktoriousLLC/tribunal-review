@@ -5,12 +5,13 @@
     "envKeys lists environment variable NAMES allowed through; requiredEnv names variables required to run.",
     "Credentials are supplied by the invoking process environment or the vendor CLI account store. No credential files are loaded.",
     "Use one account per vendor. Do not pool credentials or proxy tokens.",
-    "The Gemini SDK entry is a disabled metered template. A repository may enable it via tribunal.config.json."
+    "The Gemini SDK entry is a disabled metered template. A repository may enable it via tribunal.config.json.",
+    "The antigravity entry is a disabled plan template: Gemini through the Antigravity CLI on a Google AI Pro sign-in. Enable it via tribunal.config.json on a machine signed in to agy."
   ],
   "legs": [
     {
       "leg": "opus",
-      "id": "claude-opus-5",
+      "id": "opus",
       "vendor": "anthropic",
       "runner": "claude-cli",
       "billing": "plan",
@@ -22,7 +23,7 @@
     },
     {
       "leg": "fable",
-      "id": "claude-fable-5",
+      "id": "fable",
       "vendor": "anthropic",
       "runner": "claude-cli",
       "billing": "plan",
@@ -36,6 +37,7 @@
     {
       "leg": "sol",
       "id": "gpt-5.6-sol",
+      "family": "sol",
       "vendor": "openai",
       "runner": "codex-cli",
       "billing": "plan",
@@ -48,6 +50,7 @@
     {
       "leg": "astra",
       "id": "gpt-6-astra",
+      "family": "astra",
       "vendor": "openai",
       "runner": "codex-cli",
       "billing": "plan",
@@ -90,6 +93,18 @@
       "enabled": false,
       "note": "Optional Google SDK reviewer. Only the GEMINI_API_KEY environment variable name is configured; no credential value or location is stored.",
       "disabledReason": "Disabled template. A repository enables this metered leg via tribunal.config.json and supplies GEMINI_API_KEY in the invoking environment."
+    },
+    {
+      "leg": "antigravity",
+      "id": "gemini-4-argon-medium",
+      "fallback": "gemini-3.8-flash-high",
+      "vendor": "google",
+      "runner": "agy-cli",
+      "billing": "plan",
+      "envKeys": [],
+      "enabled": false,
+      "note": "Gemini through the Antigravity CLI (agy) on the Google AI Pro sign-in. No key or service account is handed to it and AI-credit overflow is switched off for each run; a spent allowance is a named not-run.",
+      "disabledReason": "Disabled template. Enable it via tribunal.config.json on a machine where agy is installed and signed in with a Google AI Pro account. It cannot run on a headless CI machine: agy offers no plan sign-in there."
     }
   ]
 }

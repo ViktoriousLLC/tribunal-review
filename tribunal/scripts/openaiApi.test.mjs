@@ -96,6 +96,50 @@ async function runAPI(leg, options = {}) {
   return runner.runOpenAIAPILeg(leg, "Review the fixture artifact.", { sourceEnv: { [KEY]: SECRET }, ...options });
 }
 
+// Removing the HTTP 429 classification or the runLeg wrapper leaves only one request.
+test("rate limit retry: HTTP 429 retries once through API dispatch and the second response wins", async (t) => {
+  const f = homeFixture(t);
+  let calls = 0, limitedAgain = false;
+  const fake = await fakeServer(t, (_request, response) => {
+    calls += 1;
+    if (calls === 1 || limitedAgain) { response.writeHead(429); response.end("quota exhausted"); }
+    else response.end(JSON.stringify(reply()));
+  });
+  f.trust({ env: KEY, origin: fake.origin });
+  const options = { sourceEnv: { [KEY]: SECRET, TRIBUNAL_RATE_LIMIT_RETRY_MS: "0" }, log: () => {} };
+  const result = await runner.runLeg(row(fake.baseUrl), "artifact", options);
+  assert.equal(calls, 2);
+  assert.equal(result.kind, "answered");
+  calls = 0;
+  limitedAgain = true;
+  const failed = await runner.runLeg(row(fake.baseUrl), "artifact", options);
+  assert.equal(calls, 2);
+  assert.equal(failed.reason, "rate limited (retried once); wait a few minutes and run again");
+});
+
+test("fix1 API: insufficient_quota keeps a redacted HTTP 429 failure without retrying", async (t) => {
+  const f = homeFixture(t);
+  const fake = await fakeServer(t, (_request, response) => {
+    response.writeHead(429);
+    response.end(`insufficient_quota ${SECRET} Bearer secret-token ${"x".repeat(300)} BODY-TAIL`);
+  });
+  f.trust({ env: KEY, origin: fake.origin });
+  const waits = [], logs = [];
+  const result = await runner.runLeg(row(fake.baseUrl), "artifact", {
+    sourceEnv: { [KEY]: SECRET, TRIBUNAL_RATE_LIMIT_RETRY_MS: "0" },
+    wait: async (ms) => waits.push(ms), log: (line) => logs.push(line),
+  });
+  assert.equal(result.kind, "failed");
+  assert.equal(result.answered, false);
+  assert.equal(result.status, 429);
+  assert.match(result.reason, /^HTTP 429: insufficient_quota \[REDACTED\] Bearer \[REDACTED\]/);
+  assert.equal(result.reason.length, "HTTP 429: ".length + 200);
+  assert.doesNotMatch(JSON.stringify(result), /fixture-key-never-a-real-credential|secret-token|BODY-TAIL/);
+  assert.equal(fake.requests.length, 1);
+  assert.deepEqual(waits, []);
+  assert.deepEqual(logs, []);
+});
+
 test("dispatch/pricing mutations: full API rounds bank measured cost and render missing pins loudly", async (t) => {
   const f = homeFixture(t);
   const fake = await fakeServer(t);

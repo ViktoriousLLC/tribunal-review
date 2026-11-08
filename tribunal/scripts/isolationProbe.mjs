@@ -16,7 +16,7 @@
 // repository. The probe never reads, prints or sends any real secret, and it deletes the
 // canary when it is done.
 //
-// Usage:  node scripts/isolationProbe.mjs [--leg claude|codex|grok] [--json]
+// Usage:  node scripts/isolationProbe.mjs [--leg claude|codex|grok|agy] [--json]
 // Exit:   0 when every enabled CLI passes, or no local agent leg is enabled.
 //         1 on FAIL, VACUOUS or UNKNOWN.
 
@@ -27,7 +27,8 @@ import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { argsForLeg, envForLeg, isOurTempDir } from "./legRunner.mjs";
+import { argsForLeg, envForLeg, isOurTempDir, agyInput, agyHomeIsolated, unwrapAgyOutput, agyOutcome } from "./legRunner.mjs";
+import { redactSensitive } from "./artifact.mjs";
 import { resolveExe } from "./executable.mjs";
 import { enabledCliLegs, cliCommand, measureCliBinding } from "./isolationBinding.mjs";
 import { resolvePolicy } from "./policy.mjs";
@@ -91,7 +92,8 @@ function run(cmd, args, { input, cwd, env, spawnFn = spawn, executable = null })
       if (code !== 0 && !out.trim()) resolve({ out, error: `exit ${code}: ${err.trim().slice(0, 300) || "(no stderr)"}` });
       else resolve({ out, error: null });
     });
-    if (input != null) { child.stdin.write(input); child.stdin.end(); }
+    // A CLI that exits before reading closes the pipe; an unheard write error would crash the probe.
+    if (input != null) { child.stdin.on?.("error", () => {}); child.stdin.write(input); child.stdin.end(); }
   });
 }
 
@@ -166,7 +168,42 @@ export async function probeGrok(directAsk, injection, canaryToken, selectedLeg,
   };
 }
 
-const PROBE_OF_RUNNER = { "claude-cli": probeClaude, "codex-cli": probeCodex, "grok-cli": probeGrok };
+export async function probeAgy(directAsk, injection, canaryToken, selectedLeg,
+  { spawnFn = spawn, mkTemp = freshCwd, sourceEnv = process.env, executable = null, platform = process.platform } = {}) {
+  const model = selectedLeg.id;
+  // The CONTROL approves every tool and carries no deny list; the guarded run differs only by the
+  // per-run --settings deny rules (and the slash-command switch). agy reads its prompt as one
+  // stream-json message, so both get the same wrapped input. The leak check reads the RAW NDJSON,
+  // tool step output included, not just the final answer.
+  // The control keeps the paid-overflow switch off too: only the deny list may differ.
+  const control = ["--input-format", "stream-json", "--output-format", "stream-json", "--model", model,
+    "--disable-slash-commands", "--dangerously-skip-permissions", "--settings", JSON.stringify({ useG1Credits: false })];
+  const guarded = argsForLeg(selectedLeg);
+  // Both runs get the same environment the panel gives the seat, empty home included.
+  const envFor = (cwd) => envForLeg(selectedLeg, sourceEnv, { home: agyHomeIsolated(platform) ? cwd : null }).env;
+  const options = { mkTemp, envFor, spawnFn, executable };
+  // agy reports a refusal (rate limit, spent allowance, bad model) as an ERROR result while exiting 0.
+  // A guarded run that never reviewed anything cannot have "not leaked", so it is a measurement error.
+  const checked = (r) => {
+    if (r.error) return r;
+    const u = unwrapAgyOutput(r.out);
+    // The same test the panel applies: a cut-off or refused run is not a review, so not a measurement.
+    const stopped = agyOutcome(u);
+    if (u.found && !stopped) return r;
+    return { ...r, error: !u.found ? "agy printed no result event"
+      : `agy result ${u.status}: ${stopped.reason}${u.error ? ` (${redactSensitive(u.error).slice(0, 200)})` : ""}` };
+  };
+  const c = checked(await runInFreshDirectory("agy", control, { ...options, input: agyInput(directAsk) }));
+  const g = checked(await runInFreshDirectory("agy", guarded, { ...options, input: agyInput(directAsk) }));
+  const inj = checked(await runInFreshDirectory("agy", guarded, { ...options, input: agyInput(injection) }));
+  return {
+    controlLeaked: leaked(c.out, canaryToken), guardedLeaked: leaked(g.out, canaryToken),
+    controlError: c.error, guardedError: g.error, controlOut: c.out, guardedOut: g.out,
+    injectionLeaked: leaked(inj.out, canaryToken), injectionOut: inj.out, injectionError: inj.error,
+  };
+}
+
+const PROBE_OF_RUNNER = { "claude-cli": probeClaude, "codex-cli": probeCodex, "grok-cli": probeGrok, "agy-cli": probeAgy };
 
 /** Persist the measured result and the invocation it certifies. A subset cannot certify it. */
 export async function writeProbeRecord(policy, verdicts,
@@ -221,7 +258,7 @@ export async function writeProbeRecord(policy, verdicts,
 /** Run the real probe orchestration with injectable process boundaries for offline tests. */
 export async function runProbe(policy, { only = null, spawnFn = spawn, resolveExecutable = resolveExe,
   spawnVersion, sourceEnv = process.env, createTemp = mkdtemp, measuredAt = new Date() } = {}) {
-  if (only && !["claude", "codex", "grok"].includes(only)) throw new Error("--leg must be claude, codex or grok");
+  if (only && !["claude", "codex", "grok", "agy"].includes(only)) throw new Error("--leg must be claude, codex, grok or agy");
   // Measure each CLI boundary once, using the model IDs selected by effective policy.
   const enabled = enabledCliLegs(policy.registry);
   const selected = enabled.filter((leg) => !only || cliCommand(leg.runner) === only);

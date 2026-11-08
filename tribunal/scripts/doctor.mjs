@@ -138,6 +138,15 @@ export function runDoctor({ cwd = process.cwd(), policy = resolvePolicy(cwd), so
       details.push(executable.found ? `binary: ${executable.file}` : "binary: grok missing on PATH and ~/.grok/bin",
         `login: ${signedIn ? "panel Grok home has a sign-in" : `not signed in; run GROK_HOME=${env.GROK_HOME} grok login --device-auth`}`,
         `billing: ${leg.billing}`, `advisory: ${leg.advisory === true}`);
+    } else if (leg.runner === "agy-cli") {
+      // agy has no auth-status command and every check that would prove the sign-in spends a
+      // model call, so doctor reports the binary only; the first panel round names a missing sign-in.
+      const executable = resolveExeFn("agy", { env });
+      runnable &&= executable.found;
+      details.push(executable.found ? `binary: ${executable.file}` : "binary: agy missing on PATH and the installer path",
+        "login: not detectable without a model call; sign in once by running agy with the Google AI Pro account",
+        `billing: ${leg.billing} (Google AI Pro; no key reaches this process and AI-credit overflow is switched off for each run)`,
+        "web search: cannot be denied; a prompt hidden in a reviewed artifact can send its text to Google Search");
     } else if (leg.runner === "genai-sdk") {
       const installed = sdkAvailableFn();
       runnable &&= installed;

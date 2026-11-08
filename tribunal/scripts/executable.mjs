@@ -40,6 +40,13 @@ export function resolveExe(cmd, { env = process.env, platform = process.platform
     const installed = path.join(home, ".grok", "bin", windows ? "grok.exe" : "grok");
     if (isFile(installed) && (windows || canExecute(installed))) return found(installed);
   }
+  // Antigravity's installer has the same gap: Windows %LOCALAPPDATA%\agy\bin, else ~/.local/bin.
+  if (cmd === "agy") {
+    const installed = windows
+      ? (env.LOCALAPPDATA ? path.join(env.LOCALAPPDATA, "agy", "bin", "agy.exe") : null)
+      : (home ? path.join(home, ".local", "bin", "agy") : null);
+    if (installed && isFile(installed) && (windows || canExecute(installed))) return found(installed);
+  }
   // Preserve the runner's named spawn-error path; doctor uses found to report the lookup.
   return { file: cmd, prefix: [], found: false, searchedDirs };
 }

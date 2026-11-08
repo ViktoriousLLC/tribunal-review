@@ -12,6 +12,17 @@ const artifact = { kind: "document", source: "x.md", title: "x.md", text: "" };
 const legOk = (leg) => ({ leg, model: `${leg}-1`, answered: true, error: null });
 const ALL = ["opus", "fable", "sol", "terra"].map(legOk);
 
+test("footer shows the answering model and whether effort was set or defaulted", () => {
+  const out = build({ legs: [
+    { ...legOk("opus"), model: "claude-opus-5-5", effortShown: "model default" },
+    { ...legOk("sol"), model: "gpt-6-sol", effortShown: "low (model default)" },
+    { ...legOk("astra"), effortShown: "high (set)" },
+  ] });
+  assert.ok(out.includes("opus (claude-opus-5-5, effort model default)"));
+  assert.ok(out.includes("sol (gpt-6-sol, effort low (model default))"));
+  assert.ok(out.includes("astra (astra-1, effort high (set))"));
+});
+
 function build({ clusters = [], legs = ALL, round = 1 }) {
   const summary = summariseRound({ legs: legs.map((l) => ({ leg: l.leg, answered: l.answered, error: l.error })), findings: clusters });
   const decision = loopDecision({ round, summary });

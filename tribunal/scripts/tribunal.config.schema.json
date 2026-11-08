@@ -5,6 +5,11 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "judge": {
+      "type": "boolean",
+      "default": true,
+      "description": "Run the blinded judge on single-model findings after each round (trial). Annotation only."
+    },
     "preset": {
       "type": "string",
       "enum": ["claude-only", "claude-plus-chatgpt", "claude-plus-api-keys"],

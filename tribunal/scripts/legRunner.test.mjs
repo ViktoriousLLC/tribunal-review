@@ -7,7 +7,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { envForLeg, argsForLeg, parseFindings, planLimitMessage, MAX_REFUSAL_CHARS, runLeg, FINDING_CONTRACT, isOurTempDir, TEMP_PREFIX, geminiUsage, geminiCostUSD, classifyLegOutcome } from "./legRunner.mjs";
+import * as legRunner from "./legRunner.mjs";
+import { envForLeg, argsForLeg, parseFindings, planLimitMessage, MAX_REFUSAL_CHARS, runLeg, retryRateLimited, FINDING_CONTRACT, isOurTempDir, TEMP_PREFIX, geminiUsage, geminiCostUSD, classifyLegOutcome } from "./legRunner.mjs";
 import { loadRegistry } from "./registry.mjs";
 import { panelRound, panelStatus, postLocalProof, repeatedReplyWarnings } from "./run.mjs";
 
@@ -15,6 +16,93 @@ import { panelRound, panelStatus, postLocalProof, repeatedReplyWarnings } from "
 // the 150-byte stdout shape with a nonzero exit and unrelated stderr noise.
 const capturedLimit = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.\n";
 const trace = "Error: review crashed\n    at review (runner.js:12:3)";
+
+// Removing rate-limit recognition fails the positive assertion in each classifier fixture;
+// the paired reviews ensure that recognizing a refusal never discards parsed or long output.
+test("classifier: stderr 429 is rate limited, but parsed findings remain answered", () => {
+  const stderr = "ERROR: exceeded retry limit, last status: 429 Too Many Requests";
+  assert.deepEqual(classifyLegOutcome({ code: 1, stderr }), { kind: "failed", reason: "rate limited" });
+  const stdout = JSON.stringify({ findings: [{ title: "Handle rate limit HTTP 429 correctly" }] });
+  assert.equal(classifyLegOutcome({ code: 0, stdout, stderr }).kind, "answered");
+  assert.notEqual(classifyLegOutcome({ code: 1, stdout, stderr }).reason, "rate limited");
+});
+
+test("fix2 classifier: an echoed 429 handler line is not a refusal; a real error line is, even after long stdout", () => {
+  assert.notEqual(classifyLegOutcome({ code: 1, stdout: "",
+    stderr: "user\n+  return res.status(429).send('Too many requests')\n" }).reason, "rate limited");
+  assert.equal(classifyLegOutcome({ code: 1, stdout: "banner ".repeat(60),
+    stderr: "ERROR: exceeded retry limit, last status: 429 Too Many Requests" }).reason, "rate limited");
+  assert.equal(classifyLegOutcome({ code: 1,
+    stderr: 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}' }).reason, "rate limited");
+  assert.equal(classifyLegOutcome({ code: 1,
+    stderr: "2026-10-28T10:00:59.120Z ERROR codex_core: last status: 429 Too Many Requests" }).reason, "rate limited");
+});
+
+test("fix3 classifier: only the last error line counts, and an unrecognised failure names it", () => {
+  // An echoed pasted log line comes before the CLI's own error.
+  const echoed = "user\nError: upstream returned 429 Too Many Requests\nERROR: stream disconnected before completion\n";
+  const outcome = classifyLegOutcome({ code: 1, stdout: "", stderr: echoed });
+  assert.equal(outcome.reason, "unrecognised");
+  assert.equal(outcome.detail, "ERROR: stream disconnected before completion");
+  // Prompt text that is not an error line is never quoted.
+  assert.equal(classifyLegOutcome({ code: 1, stderr: "user\nsecret prompt text\n" }).detail, undefined);
+  assert.equal(classifyLegOutcome({ code: 1, stderr: "ERROR: something\nERROR: exceeded retry limit, last status: 429 Too Many Requests" }).reason, "rate limited");
+});
+
+test("fix2 Gemini: an insufficient_quota 429 is not retried", async () => {
+  let calls = 0;
+  const leg = { leg: "gemini", id: "g-pro", fallback: null, runner: "genai-sdk", envKeys: ["GEMINI_API_KEY"] };
+  const result = await runLeg(leg, "artifact", { sourceEnv: { GEMINI_API_KEY: "k", TRIBUNAL_RATE_LIMIT_RETRY_MS: "0" },
+    log: () => {}, wait: async () => {},
+    generateContent: async () => { calls += 1; throw Object.assign(new Error("insufficient_quota: billing"), { status: 429 }); } });
+  assert.equal(calls, 1);
+  assert.notEqual(result.reason, "rate limited");
+});
+
+test("classifier: a timeout or a loose stderr phrase is not a rate limit", () => {
+  const stderr = "ERROR: exceeded retry limit, last status: 429 Too Many Requests";
+  assert.notEqual(classifyLegOutcome({ timedOut: true, stderr }).reason, "rate limited");
+  assert.notEqual(classifyLegOutcome({ code: 1, stderr: "user\nReview this diff: add a rate limit to /api/login" }).reason, "rate limited");
+});
+
+test("classifier: short stdout rate limits require a failed exit without matching a long review", () => {
+  for (const code of [0, 1]) {
+    assert.equal(classifyLegOutcome({ code, stdout: "Rate limit exceeded" }).reason,
+      code === 0 ? "reply could not be parsed" : "rate limited");
+    const stdout = `The rate limit returns 429 Too Many Requests. ${"Review discussion. ".repeat(40)}`;
+    assert.notEqual(classifyLegOutcome({ code, stdout }).reason, "rate limited");
+  }
+});
+
+// fix2 narrowed this: the stderr line must START with an error marker, so lines that only
+// mention 429 (an echoed diff, a log message) moved from the positive list to the negative one.
+test("fix1 classifier: stderr requires an error line naming 429", () => {
+  for (const stderr of [
+    'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"..."}}',
+    "noise\nERROR: exceeded retry limit, last status: 429 Too Many Requests\nnoise",
+  ]) assert.equal(classifyLegOutcome({ code: 1, stderr }).reason, "rate limited", stderr);
+  for (const stderr of ["noise\nRATE-LIMIT error; status 429\nnoise", "429 ratelimit", "Too Many Requests: 429",
+    "echoed prompt: rate_limit_exceeded", "429\nrate_limit_error",
+    "rate limit\r\n429", "429\ntoo many requests", "too many requests\n429", "1429 rate_limit_error"]) {
+    assert.notEqual(classifyLegOutcome({ code: 1, stderr }).reason, "rate limited", stderr);
+  }
+});
+
+test("fix1 classifier: short stdout accepts rate_limit_error", () => {
+  for (const stdout of ["rate_limit_error", "Rate-Limit_Error", "ratelimit_error", "Too Many Requests: 429"]) {
+    assert.equal(classifyLegOutcome({ code: 1, stdout }).reason, "rate limited", stdout);
+  }
+  assert.notEqual(classifyLegOutcome({ code: 1, stdout: "rate_limit_error " + "x".repeat(256) }).reason, "rate limited");
+});
+
+test("fix1 classifier: insufficient_quota on either stream prevents rate-limit retries", () => {
+  for (const signals of [
+    { stderr: "429 Too Many Requests insufficient_quota" },
+    { stdout: "rate limit: insufficient_quota" },
+    { stdout: "insufficient_quota", stderr: "429 Too Many Requests" },
+    { stdout: "rate limit", stderr: "insufficient_quota" },
+  ]) assert.notEqual(classifyLegOutcome({ code: 1, ...signals }).reason, "rate limited");
+});
 
 test("classifier: a 150-byte plan-limit reply did not run", () => {
   assert.equal(Buffer.byteLength(capturedLimit), 150);
@@ -168,6 +256,232 @@ function fakeChild({ stdout = "", stderr = "", code = 0, error, hang = false } =
 // with a timeout. The timeout threshold and completion wait serve different purposes.
 const HANG_TIMEOUT_MS = 20;
 const SETTLE_TIMEOUT_MS = 5000;
+
+// Restoring the old runner fails the helper assertion and each integration outcome below:
+// echoed errors, traces and quota text must not classify the CLI's actual response.
+test("fix4 prompt stripping: normalizes lines and removes only nonempty whole prompt lines", () => {
+  assert.equal(typeof legRunner.stripEchoedPrompt, "function");
+  const prompt = "  Error: artifact 429\r\n\r\ncontract\n  repeated  \nrepeated";
+  const stderr = "\tError: artifact 429  \r\ncontract\nrepeated\n\nERROR: actual failure\ncontract extra\n";
+  assert.equal(legRunner.stripEchoedPrompt(stderr, prompt), "\nERROR: actual failure\ncontract extra\n");
+  assert.equal(legRunner.stripEchoedPrompt("noise\r\n\n", "\r\n  "), "noise\n\n");
+});
+
+for (const runner of ["claude-cli", "codex-cli", "grok-cli"]) {
+  test(`fix4 prompt stripping: ${runner} classifies and quotes only filtered stderr`, async () => {
+    const leg = { leg: "test", id: "test", runner, envKeys: [] };
+    const cases = [
+      ["Error: artifact returned 429", "contract", "", "unrecognised", undefined],
+      ["Error: private artifact text", "contract", "", "unrecognised", undefined],
+      ["artifact", "ERROR: contract returned 429", "", "unrecognised", undefined],
+      ["Error: artifact returned 429", "contract", "ERROR: real transport error\n", "unrecognised", "ERROR: real transport error"],
+      ["Error: example\n    at review (runner.js:12:3)\ninsufficient_quota", "contract",
+        "ERROR: real rate limit 429\n", "rate limited (retried once); wait a few minutes and run again", undefined],
+    ];
+    for (const [userMessage, contract, actualError, reason, detail] of cases) {
+      let calls = 0;
+      const result = await runLeg(leg, userMessage, {
+        contract, sourceEnv: {}, mkTemp: async () => ".", timeoutMs: SETTLE_TIMEOUT_MS,
+        log: () => {}, wait: async () => {},
+        spawnFn: () => {
+          calls += 1;
+          const prompt = `${userMessage}\n\n${contract}`;
+          // Echo what was actually sent, after the real error, including whitespace changes.
+          const child = fakeChild({ code: 1, stderr: actualError + prompt.split("\n").map((line) => `${line} `).join("\r\n") + "\r\n" });
+          child.stdin.write = (text) => assert.equal(text, prompt);
+          return child;
+        },
+      });
+      assert.equal(result.reason, reason);
+      assert.equal(result.detail, detail);
+      assert.equal(calls, reason.startsWith("rate limited") ? 2 : 1);
+    }
+  });
+}
+
+// Old code exposes the credential, and truncating before redaction leaves a partial key.
+test("fix4 detail: redact the whole error before limiting it to 160 characters", () => {
+  const prefix = "ERROR: " + "x".repeat(145);
+  const result = classifyLegOutcome({ code: 1, stderr: prefix + "sk-" + "a".repeat(32) });
+  assert.equal(result.detail, (prefix + "sk-REDACTED").slice(0, 160));
+  assert.equal(result.detail.length, 160);
+});
+
+// Restoring the old classifier makes both successful-exit signals refusals.
+test("fix4 rate limit: exit zero never refuses on either stream", () => {
+  for (const signals of [{ stdout: "rate_limit_error" }, { stderr: "ERROR: status 429" }]) {
+    assert.notEqual(classifyLegOutcome({ code: 0, ...signals }).reason, "rate limited");
+  }
+});
+
+// The old loose phrase discards ordinary review prose. (A long `API Error: 429` result is a rate
+// limit at any length since fix5: it is the Claude envelope's own refusal, anchored at the start.)
+test("fix4 rate limit: short stdout must start with a refusal or end in a 429 error line", () => {
+  for (const stdout of ["No defects; the rate limiter in auth.js looks correct.",
+    "The rate limit looks correct.", "429 Too Many Requests", "rate limiter", "rate_limit_error_extra",
+    "ERROR: 429\nERROR: disconnected"]) {
+    assert.notEqual(classifyLegOutcome({ code: 1, stdout }).reason, "rate limited", stdout);
+  }
+  for (const stdout of ["Rate limit exceeded", "rate_limit_error", "rate_limit_exceeded", "rate-limited",
+    "error: too many requests", "Too many requests", "API Error: 429 slow down",
+    "banner\nERROR: last status 429", " \n" + "rate limit " + "x".repeat(245) + " \n"]) {
+    assert.equal(classifyLegOutcome({ code: 1, stdout }).reason, "rate limited", stdout);
+  }
+});
+
+// The old early return never reaches the independently quota'd fallback.
+test("fix4 Gemini: a rate limited primary can succeed on its fallback", async () => {
+  const models = [];
+  const result = await legRunner.runGeminiLeg({ leg: "gemini", id: "primary", fallback: "fallback" }, "artifact", {
+    sourceEnv: { GEMINI_API_KEY: "fixture" }, generateContent: async ({ model }) => {
+      models.push(model);
+      if (model === "primary") throw Object.assign(new Error("rate limited"), { status: 429 });
+      return { text: '{"findings":[]}' };
+    },
+  });
+  assert.deepEqual(models, ["primary", "fallback"]);
+  assert.equal(result.kind, "answered");
+  assert.equal(result.model, "fallback");
+});
+
+// The old early return retries mixed failures and hides the fallback's billing failure.
+test("fix4 Gemini: only all-429 ladders without insufficient_quota are rate limited", async () => {
+  for (const failures of [[429, 503], [503, 429], [429, "quota"], ["quota", 429], [429, 429]]) {
+    const models = [];
+    const result = await legRunner.runGeminiLeg({ leg: "gemini", id: "primary", fallback: "fallback" }, "artifact", {
+      sourceEnv: { GEMINI_API_KEY: "fixture" }, generateContent: async ({ model }) => {
+        const failure = failures[models.length];
+        models.push(model);
+        throw Object.assign(new Error(failure === "quota" ? "insufficient_quota" : `status ${failure}`),
+          { code: failure === "quota" ? 429 : failure });
+      },
+    });
+    assert.deepEqual(models, ["primary", "fallback"]);
+    if (failures.every((failure) => failure === 429)) assert.equal(result.reason, "rate limited");
+    else {
+      assert.equal(result.reason, "unrecognised");
+      assert.match(result.error, /every Gemini rung failed: primary: .*; fallback:/);
+    }
+  }
+});
+
+// Removing the wrapper leaves one invocation; an unbounded retry exceeds the expected two.
+test("rate limit retry: every CLI retries exactly once and uses the second result", async () => {
+  for (const runner of ["claude-cli", "codex-cli", "grok-cli"]) {
+    for (const limitedAgain of [false, true]) {
+      let calls = 0;
+      const logs = [], waits = [];
+      const leg = { leg: "test-seat", id: "test-model", runner, envKeys: [], requiredEnv: [] };
+      const result = await runLeg(leg, "artifact", {
+        sourceEnv: { TRIBUNAL_RATE_LIMIT_RETRY_MS: "25" }, random: () => 0, timeoutMs: SETTLE_TIMEOUT_MS,
+        mkTemp: async () => ".", log: (line) => logs.push(line), wait: async (ms) => waits.push(ms),
+        spawnFn: () => {
+          calls += 1;
+          return calls === 1 || limitedAgain
+            ? fakeChild({ code: 1, stderr: "ERROR: exceeded retry limit, last status: 429 Too Many Requests" })
+            : fakeChild({ stdout: '{"findings":[{"title":"Second answer"}]}' });
+        },
+      });
+      assert.equal(calls, 2);
+      assert.deepEqual(waits, [25]);
+      assert.deepEqual(logs, ["[panel] test-seat: rate limited by the vendor, retrying once in 0.025s"]);
+      if (limitedAgain) {
+        assert.equal(result.reason, "rate limited (retried once); wait a few minutes and run again");
+        assert.equal(result.kind, "failed");
+        assert.equal(result.answered, false);
+        assert.equal(panelRound([result], []).decision.reason, "PARTIAL");
+      } else {
+        assert.equal(result.kind, "answered");
+        assert.equal(result.findings[0].title, "Second answer");
+      }
+    }
+  }
+});
+
+test("rate limit retry: API and SDK results use the same delay and single retry rule", async () => {
+  for (const runner of ["openai-api", "genai-sdk"]) {
+    let calls = 0;
+    const waits = [], second = { kind: "answered", findings: [] };
+    assert.equal(await retryRateLimited({ leg: "vendor", runner }, async () => ++calls === 1
+      ? { kind: "failed", reason: "rate limited" } : second,
+    { sourceEnv: {}, random: () => 0, log: () => {}, wait: async (ms) => waits.push(ms) }), second);
+    assert.equal(calls, 2);
+    assert.deepEqual(waits, [60000]);
+  }
+  let calls = 0;
+  await retryRateLimited({ leg: "vendor" }, async () => { calls += 1; return { reason: "unrecognised" }; });
+  assert.equal(calls, 1);
+});
+
+test("fix1 retry: empty and whitespace delays use the default", async () => {
+  for (const value of [undefined, "", " \t\n"]) {
+    const waits = [];
+    await retryRateLimited({ leg: "vendor" }, async () => ({ reason: "rate limited" }), {
+      sourceEnv: { TRIBUNAL_RATE_LIMIT_RETRY_MS: value }, random: () => 0,
+      log: () => {}, wait: async (ms) => waits.push(ms),
+    });
+    assert.deepEqual(waits, [60000], JSON.stringify(value));
+  }
+});
+
+test("fix1 retry: injected jitter controls the actual wait and rounded log", async () => {
+  for (const [delay, random, expected, seconds] of [
+    [60000, 0.5, 67500, "68"], [60000, 0, 60000, "60"], [60000, 0.9999, 74998, "75"],
+    [100, 0.75, 118, "0.118"], [0, 0.5, 0, "0"],
+  ]) {
+    const waits = [], logs = [];
+    await retryRateLimited({ leg: "vendor" }, async () => ({ reason: "rate limited" }), {
+      sourceEnv: { TRIBUNAL_RATE_LIMIT_RETRY_MS: String(delay) }, random: () => random,
+      log: (line) => logs.push(line), wait: async (ms) => waits.push(ms),
+    });
+    assert.deepEqual(waits, [expected]);
+    assert.deepEqual(logs, [`[panel] vendor: rate limited by the vendor, retrying once in ${seconds}s`]);
+  }
+});
+
+test("rate limit retry: Gemini exhausts its fallback ladder before retrying once", async () => {
+  for (const limitedAgain of [false, true]) {
+    const models = [];
+    const result = await runLeg({ leg: "gemini", id: "primary", fallback: "fallback", runner: "genai-sdk" }, "artifact", {
+      sourceEnv: { GEMINI_API_KEY: "fixture", TRIBUNAL_RATE_LIMIT_RETRY_MS: "0" }, log: () => {},
+      generateContent: async ({ model }) => {
+        models.push(model);
+        if (models.length === 1 || limitedAgain) throw Object.assign(new Error("RESOURCE_EXHAUSTED"), { status: 429 });
+        return { text: '{"findings":[{"title":"SDK second answer"}]}' };
+      },
+    });
+    assert.deepEqual(models, limitedAgain ? ["primary", "fallback", "primary", "fallback"] : ["primary", "fallback"]);
+    if (limitedAgain) assert.match(result.reason, /rate limited \(retried once\)/);
+    else assert.equal(result.findings[0].title, "SDK second answer");
+  }
+});
+
+test("runLeg writes a custom contract to stdin and preserves the default when omitted", async () => {
+  for (const contract of [undefined, "Reply only with the custom verdict."]) {
+    let stdin = "";
+    const result = await runLeg(claudeLeg, "artifact message", {
+      contract, sourceEnv: SOURCE, mkTemp: async () => ".", timeoutMs: SETTLE_TIMEOUT_MS,
+      spawnFn: () => {
+        const child = fakeChild({ stdout: '{"findings":[]}' });
+        child.stdin.write = (text) => { stdin += text; };
+        return child;
+      },
+    });
+    assert.equal(result.kind, "answered");
+    assert.equal(stdin, `artifact message\n\n${contract ?? FINDING_CONTRACT}`);
+  }
+});
+
+test("a real judge reply survives the leg runner's parser with its id, verdict and why intact", async () => {
+  const reply = '{"findings":[{"id":"F1","verdict":"demote","why":"Handled at line 4."},{"id":"F2","verdict":"keep","why":"Line 9 drops it."}]}';
+  const result = await runLeg(claudeLeg, "artifact message", {
+    contract: "judge contract", sourceEnv: SOURCE, mkTemp: async () => ".", timeoutMs: SETTLE_TIMEOUT_MS,
+    spawnFn: () => fakeChild({ stdout: reply }),
+  });
+  assert.equal(result.kind, "answered");
+  assert.equal(result.parseFailed, false);
+  assert.deepEqual(result.findings, JSON.parse(reply).findings);
+});
 
 test("runLeg routes close, emitted error and timeout through the classifier", async () => {
   const cases = [
@@ -660,4 +974,41 @@ test("A SHORT REVIEW THAT QUOTES THE SENTENCE AND PRODUCES FINDINGS IS NOT A REF
   // The genuine refusal still registers, or the fix has disabled the check.
   const realRefusal = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage to continue.";
   assert.ok(planLimitMessage(realRefusal), "the real refusal stopped being recognised");
+});
+
+test("fix3 Claude: a 429 inside the JSON result envelope on stdout is retried", async () => {
+  let calls = 0;
+  const envelope = JSON.stringify({ type: "result", is_error: true, session_id: "s".repeat(80),
+    result: 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Number of requests has exceeded your rate limit. Please try again later."}}',
+    usage: { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 0 }, modelUsage: { "claude-opus-5-5": { outputTokens: 0 } } });
+  const leg = { leg: "opus", id: "opus", runner: "claude-cli", envKeys: [] };
+  const result = await runLeg(leg, "artifact", { sourceEnv: { TRIBUNAL_RATE_LIMIT_RETRY_MS: "0" }, mkTemp: async () => ".",
+    log: () => {}, wait: async () => {}, timeoutMs: SETTLE_TIMEOUT_MS,
+    spawnFn: () => { calls += 1; return calls === 1 ? fakeChild({ code: 1, stdout: envelope })
+      : fakeChild({ stdout: JSON.stringify({ result: '{"findings":[{"title":"After retry"}]}', modelUsage: {} }) }); } });
+  assert.equal(calls, 2);
+  assert.equal(result.findings[0].title, "After retry");
+});
+
+test("fix5 classifier: a long Claude API Error 429 result is still a rate limit", () => {
+  const output = `API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"${"x".repeat(400)}"}}`;
+  assert.equal(classifyLegOutcome({ code: 1, stdout: output }).reason, "rate limited");
+});
+
+test("fix6 classifier: a non-429 Claude API error in the envelope is named in the detail", () => {
+  const outcome = classifyLegOutcome({ code: 1, stdout: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}' });
+  assert.equal(outcome.reason, "unrecognised");
+  assert.match(outcome.detail, /^API Error: 529/);
+});
+
+test("fix7 classifier: a plan-limit refusal beside a 429 line stays not-run; Gemini's per-minute quota wording is retried", async () => {
+  const stderr = 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}';
+  assert.equal(classifyLegOutcome({ code: 1, stdout: legRunner.FABLE_PLAN_LIMIT_REPLY, stderr }).kind, "not-run");
+  let calls = 0;
+  const leg = { leg: "gemini", id: "g-pro", fallback: null, runner: "genai-sdk", envKeys: ["GEMINI_API_KEY"] };
+  const result = await runLeg(leg, "artifact", { sourceEnv: { GEMINI_API_KEY: "k", TRIBUNAL_RATE_LIMIT_RETRY_MS: "0" },
+    log: () => {}, wait: async () => {},
+    generateContent: async () => { calls += 1; throw Object.assign(new Error("RESOURCE_EXHAUSTED: You exceeded your current quota"), { status: 429 }); } });
+  assert.equal(calls, 2);
+  assert.match(result.reason, /rate limited \(retried once\)/);
 });
